@@ -252,13 +252,19 @@ with st.form("entry_form", clear_on_submit=False):
     notes = st.text_input("备注")
 
     st.markdown("### 治疗师")
+    therapist_options = st.session_state.therapists + ["(手动新增治疗师)"]
+
     if payment_type == "pc":
-        st.info("PC 类型可以不选择治疗师；如果这单也要记到某位治疗师名下，可以手动选择。")
+        st.info("PC 类型可以不选择治疗师；如果这单需要记到某位治疗师名下，也可以选择治疗师。")
         therapist_mode = st.radio("PC 是否关联治疗师", ["不关联治疗师", "关联治疗师"], horizontal=True)
         if therapist_mode == "关联治疗师":
             tc1, tc2 = st.columns(2)
             with tc1:
-                therapist_name = st.selectbox("治疗师姓名", st.session_state.therapists, key="pc_therapist_name")
+                selected_therapist = st.selectbox("治疗师姓名（可选择或新增）", therapist_options, key="pc_selected_therapist")
+                if selected_therapist == "(手动新增治疗师)":
+                    therapist_name = st.text_input("输入新治疗师姓名", key="pc_new_therapist_name").strip()
+                else:
+                    therapist_name = selected_therapist
             with tc2:
                 auto_income = DURATION_RATE_MAP[duration]
                 therapist_income = st.number_input(
@@ -267,7 +273,7 @@ with st.form("entry_form", clear_on_submit=False):
                     value=float(auto_income),
                     step=1.0,
                     format="%.2f",
-                    help="PC 也可以手动选择治疗师并记录工资。"
+                    help="默认按时长自动带出，也可手动修改。"
                 )
         else:
             therapist_name = ""
@@ -276,7 +282,11 @@ with st.form("entry_form", clear_on_submit=False):
         st.info("当前付款类型必须选择治疗师。")
         tc1, tc2 = st.columns(2)
         with tc1:
-            therapist_name = st.selectbox("治疗师姓名", st.session_state.therapists, key="normal_therapist_name")
+            selected_therapist = st.selectbox("治疗师姓名（可选择或新增）", therapist_options, key="normal_selected_therapist")
+            if selected_therapist == "(手动新增治疗师)":
+                therapist_name = st.text_input("输入新治疗师姓名", key="normal_new_therapist_name").strip()
+            else:
+                therapist_name = selected_therapist
         with tc2:
             auto_income = DURATION_RATE_MAP[duration]
             therapist_income = st.number_input(
@@ -297,6 +307,8 @@ with st.form("entry_form", clear_on_submit=False):
         if payment_type != "pc" and not therapist_name:
             st.error("除 PC 外，所有客人都必须选择治疗师。")
         else:
+            if therapist_name and therapist_name not in st.session_state.therapists:
+                st.session_state.therapists.append(therapist_name)
             row = {
                 "date": str(entry_date),
                 "payment_type": payment_type,
@@ -670,4 +682,5 @@ if not df.empty:
         "therapist_income", "tip", "total_revenue", "profit", "notes", "created_at"
     ]
     st.dataframe(df[show_cols].sort_values(["date", "created_at"], ascending=[False, False]), use_container_width=True)
+
 

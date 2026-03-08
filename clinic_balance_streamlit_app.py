@@ -27,7 +27,7 @@ DURATION_RATE_MAP = {
     "105 min": 113.75,
     "120 min": 130.0,
 }
-DEFAULT_THERAPISTS = ["Jenny", "Janice", "Alex"]
+DEFAULT_THERAPISTS = ["Jenny", "Bonnie", "Sophia","Nancy","Martha","Ammabelle","Le Ann","Domingo"]
 SPREADSHEET_NAME = "massageprofit"
 WORKSHEET_NAME = "transactions"
 SCOPES = [

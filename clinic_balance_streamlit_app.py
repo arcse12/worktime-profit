@@ -127,6 +127,13 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[required_columns]
 
 
+def therapist_select_options(include_blank=True, blank_text="请选择治疗师"):
+    therapists = [str(t).strip() for t in st.session_state.therapists if str(t).strip()]
+    if include_blank:
+        return [blank_text] + therapists
+    return therapists
+
+
 def load_data_from_sheet(worksheet):
     try:
         records = worksheet.get_all_records()
@@ -256,7 +263,10 @@ with st.form("entry_form", clear_on_submit=False):
         therapist_name = ""
         therapist_income = 0.0
     else:
-        therapist_name = st.selectbox("治疗师姓名", st.session_state.therapists)
+        therapist_options = therapist_select_options()
+        therapist_name = st.selectbox("治疗师姓名", therapist_options, key="entry_therapist_name")
+        if therapist_name == "请选择治疗师":
+            therapist_name = ""
         auto_income = DURATION_RATE_MAP[duration]
         therapist_income = st.number_input(
             "治疗师收入 ($)",
@@ -273,7 +283,7 @@ with st.form("entry_form", clear_on_submit=False):
     submitted = st.form_submit_button("保存记录")
 
     if submitted:
-        if payment_type != "pc" and not therapist_name:
+        if not therapist_name and not (payment_type == "pc" and therapist_mode == "不关联治疗师"):
             st.error("请选择治疗师姓名")
         else:
             row = {
@@ -394,7 +404,7 @@ else:
 
     with query_tab1:
         st.subheader("查询该治疗师这个月工资总共多少")
-        therapists_for_query = sorted([t for t in df["therapist_name"].dropna().unique().tolist() if str(t).strip() != ""])
+        therapists_for_query = therapist_select_options(include_blank=False)
         months_for_query = sorted(df["month"].dropna().unique().tolist(), reverse=True)
 
         if therapists_for_query and months_for_query:
@@ -427,7 +437,7 @@ else:
 
     with query_tab2:
         st.subheader("打印该月每天该治疗师的客人名单与收入")
-        therapists_for_print = sorted([t for t in df["therapist_name"].dropna().unique().tolist() if str(t).strip() != ""])
+        therapists_for_print = therapist_select_options(include_blank=False)
         months_for_print = sorted(df["month"].dropna().unique().tolist(), reverse=True)
 
         if therapists_for_print and months_for_print:
@@ -554,33 +564,4 @@ if not df.empty:
     ]
     st.dataframe(df[show_cols].sort_values("date", ascending=False), use_container_width=True)
 
-# -----------------------------
-# 底部说明
-# -----------------------------
-st.markdown("---")
-st.subheader("Google Sheets 配置说明")
-st.code('''
-1. 程序会自动打开或创建 Google Sheet，例如：Massage_Work_Profit
-2. 建立 worksheet：transactions
-3. Google Cloud 创建 Service Account，并下载 JSON key
-4. 把 JSON 内容放进 .streamlit/secrets.toml
-5. 把该 service account 的 client_email 分享到你的 Google Sheet 编辑权限
-6. 安装依赖：
-   pip install streamlit pandas gspread google-auth
-7. 运行：
-   streamlit run clinic_balance_streamlit_app.py
-''')
 
-st.subheader("当前利润算法")
-st.write("利润 = 总收入 - 治疗师工资 - 小费")
-
-st.subheader("已实现的规则")
-st.write("1. 付款类型固定为 pc / pfp / pbm / pbi / pbc")
-st.write("2. pc 不需要填写治疗师姓名，且治疗师收入默认为 0")
-st.write("3. 治疗师姓名为可编辑菜单，可在左侧新增或删除")
-st.write("4. 治疗师收入按时间自动带出，也支持手动修改")
-st.write("5. 表格显示每日收支、每月收支、每年总收支")
-st.write("6. 支持治疗师小费录入")
-st.write("7. 支持按治疗师查询月工资总额")
-st.write("8. 支持打印某治疗师某月份的每日客人名单与收入")
-st.write("9. 支持按月、按年查询总利润")

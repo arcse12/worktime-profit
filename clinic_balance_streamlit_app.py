@@ -28,8 +28,11 @@ DURATION_RATE_MAP = {
     "120 min": 130.0,
 }
 DEFAULT_THERAPISTS = ["Jenny", "Bonnie", "Sophia","Nancy","Martha","Ammabelle","Le Ann","Domingo"]
+
 SPREADSHEET_NAME = "massageprofit"
 WORKSHEET_NAME = "transactions"
+THERAPIST_WORKSHEET_NAME = "therapists"
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -48,25 +51,17 @@ BASE_COLUMNS = [
     "created_at",
 ]
 
-# -----------------------------
-# Session State 初始化
-# -----------------------------
-if "therapists" not in st.session_state:
-    st.session_state.therapists = DEFAULT_THERAPISTS.copy()
-
-if "local_data" not in st.session_state:
-    st.session_state.local_data = pd.DataFrame(columns=BASE_COLUMNS)
 
 # -----------------------------
 # Google Sheets 连接函数
 # -----------------------------
 def connect_google_sheet():
     if gspread is None or Credentials is None:
-        return None, "未安装 gspread / google-auth，当前使用本地模式。"
+        return None, None, "未安装 gspread / google-auth，当前使用本地模式。"
 
     try:
         if "gcp_service_account" not in st.secrets:
-            return None, "未检测到 Google 凭证，当前使用本地模式。"
+            return None, None, "未检测到 Google 凭证，当前使用本地模式。"
 
         creds_info = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
@@ -93,9 +88,43 @@ def connect_google_sheet():
         except Exception:
             pass
 
-        return worksheet, f"Google Sheets 已连接：{sheet_name} / {worksheet_name}"
+        return spreadsheet, worksheet, f"Google Sheets 已连接：{sheet_name} / {worksheet_name}"
     except Exception as e:
-        return None, f"Google Sheets 连接失败：{e}"
+        return None, None, f"Google Sheets 连接失败：{e}"
+
+
+def get_or_create_therapist_worksheet(spreadsheet):
+    try:
+        ws = spreadsheet.worksheet(THERAPIST_WORKSHEET_NAME)
+    except Exception:
+        ws = spreadsheet.add_worksheet(title=THERAPIST_WORKSHEET_NAME, rows=200, cols=5)
+        ws.append_row(["therapist_name"])
+        for name in DEFAULT_THERAPISTS:
+            ws.append_row([name])
+    return ws
+
+
+def load_therapists_from_sheet(spreadsheet):
+    try:
+        ws = get_or_create_therapist_worksheet(spreadsheet)
+        values = ws.col_values(1)
+        if not values:
+            return DEFAULT_THERAPISTS.copy()
+
+        therapists = [v.strip() for v in values[1:] if str(v).strip()]
+        return therapists if therapists else DEFAULT_THERAPISTS.copy()
+    except Exception:
+        return DEFAULT_THERAPISTS.copy()
+
+
+def save_therapists_to_sheet(spreadsheet, therapists):
+    ws = get_or_create_therapist_worksheet(spreadsheet)
+    ws.clear()
+    ws.append_row(["therapist_name"])
+    for name in therapists:
+        clean_name = str(name).strip()
+        if clean_name:
+            ws.append_row([clean_name])
 
 
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -184,7 +213,20 @@ def refresh_data(worksheet):
     return df_local
 
 
-worksheet, gs_message = connect_google_sheet()
+# -----------------------------
+# 初始化
+# -----------------------------
+spreadsheet, worksheet, gs_message = connect_google_sheet()
+
+if "therapists" not in st.session_state:
+    if spreadsheet is not None:
+        st.session_state.therapists = load_therapists_from_sheet(spreadsheet)
+    else:
+        st.session_state.therapists = DEFAULT_THERAPISTS.copy()
+
+if "local_data" not in st.session_state:
+    st.session_state.local_data = pd.DataFrame(columns=BASE_COLUMNS)
+
 
 # -----------------------------
 # 侧边栏
@@ -198,12 +240,19 @@ with st.sidebar:
 
     st.subheader("治疗师名单管理")
     new_therapist = st.text_input("新增治疗师")
+
     if st.button("添加治疗师"):
         name = new_therapist.strip()
         if name:
             if name not in st.session_state.therapists:
                 st.session_state.therapists.append(name)
+                if spreadsheet is not None:
+                    try:
+                        save_therapists_to_sheet(spreadsheet, st.session_state.therapists)
+                    except Exception as e:
+                        st.error(f"已更新本地名单，但保存到 Google Sheets 失败：{e}")
                 st.success(f"已添加治疗师：{name}")
+                st.rerun()
             else:
                 st.info("该治疗师已存在")
         else:
@@ -214,17 +263,25 @@ with st.sidebar:
         if st.button("删除选中的治疗师"):
             if therapist_to_remove:
                 st.session_state.therapists.remove(therapist_to_remove)
+                if spreadsheet is not None:
+                    try:
+                        save_therapists_to_sheet(spreadsheet, st.session_state.therapists)
+                    except Exception as e:
+                        st.error(f"已更新本地名单，但保存到 Google Sheets 失败：{e}")
                 st.success(f"已删除治疗师：{therapist_to_remove}")
+                st.rerun()
 
     st.markdown("---")
     st.write("当前治疗师名单：")
     for i, t in enumerate(st.session_state.therapists, start=1):
         st.write(f"{i}. {t}")
 
+
 # -----------------------------
 # 数据载入
 # -----------------------------
 df = refresh_data(worksheet)
+
 
 # -----------------------------
 # 新增记录
@@ -317,8 +374,9 @@ with st.form("entry_form", clear_on_submit=False):
             except Exception as e:
                 st.error(f"保存失败：{e}")
 
-# 重新读取
+
 df = refresh_data(worksheet)
+
 
 # -----------------------------
 # 修改错误记录
@@ -483,6 +541,7 @@ else:
                     except Exception as e:
                         st.error(f"修改失败：{e}")
 
+
 # -----------------------------
 # 删除错误记录
 # -----------------------------
@@ -570,6 +629,7 @@ else:
                 except Exception as e:
                     st.error(f"删除失败：{e}")
 
+
 # -----------------------------
 # 汇总显示
 # -----------------------------
@@ -609,6 +669,7 @@ else:
 
     with tab3:
         st.dataframe(yearly_summary, use_container_width=True)
+
 
 # -----------------------------
 # 查询功能
@@ -713,11 +774,7 @@ else:
 
                 detail_df = print_df[display_cols].copy()
 
-                csv_text = (
-                    summary_df.to_csv(index=False)
-                    + "\n"
-                    + detail_df.to_csv(index=False)
-                )
+                csv_text = summary_df.to_csv(index=False) + "\n" + detail_df.to_csv(index=False)
                 csv_data = csv_text.encode("utf-8-sig")
 
                 st.download_button(
@@ -798,6 +855,7 @@ else:
                 profit=("profit", "sum"),
             ).sort_values("month")
             st.dataframe(year_monthly_profit, use_container_width=True)
+
 
 # -----------------------------
 # 原始记录

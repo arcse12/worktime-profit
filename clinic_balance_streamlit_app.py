@@ -13,7 +13,7 @@ except Exception:
 st.set_page_config(page_title="Clinic Income & Expense Tracker", layout="wide")
 
 st.title("诊所每日收支平衡系统")
-st.caption("Streamlit + Google Sheets | 支持每日、每月、每年汇总 | 治疗师工资核对 | 支持修改错误记录")
+st.caption("Streamlit + Google Sheets | 支持每日、每月、每年汇总 | 治疗师工资核对 | 支持修改与删除错误记录")
 
 # -----------------------------
 # 基础配置
@@ -30,7 +30,6 @@ DURATION_RATE_MAP = {
 DEFAULT_THERAPISTS = ["Jenny", "Janice", "Alex"]
 SPREADSHEET_NAME = "massageprofit"
 WORKSHEET_NAME = "transactions"
-OWNER_EMAIL = "arcse12@gmail.com"
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -46,7 +45,6 @@ BASE_COLUMNS = [
     "tip",
     "total_revenue",
     "profit",
-    "notes",
     "created_at",
 ]
 
@@ -81,11 +79,6 @@ def connect_google_sheet():
             spreadsheet = client.open(sheet_name)
         except Exception:
             spreadsheet = client.create(sheet_name)
-            try:
-                if OWNER_EMAIL:
-                    spreadsheet.share(OWNER_EMAIL, perm_type="user", role="writer", notify=False)
-            except Exception:
-                pass
 
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
@@ -93,7 +86,14 @@ def connect_google_sheet():
             worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=3000, cols=30)
             worksheet.append_row(BASE_COLUMNS)
 
-        return worksheet, "Google Sheets 已连接。"
+        try:
+            first_row = worksheet.row_values(1)
+            if not first_row:
+                worksheet.append_row(BASE_COLUMNS)
+        except Exception:
+            pass
+
+        return worksheet, f"Google Sheets 已连接：{sheet_name} / {worksheet_name}"
     except Exception as e:
         return None, f"Google Sheets 连接失败：{e}"
 
@@ -101,14 +101,14 @@ def connect_google_sheet():
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in BASE_COLUMNS:
         if col not in df.columns:
-            if col in ["payment_type", "therapist_name", "client_name", "duration", "notes", "created_at", "date"]:
+            if col in ["date", "payment_type", "therapist_name", "client_name", "duration", "created_at"]:
                 df[col] = ""
             else:
                 df[col] = 0.0
     return df[BASE_COLUMNS]
 
 
-def therapist_select_options(include_blank=True, blank_text="请选择治疗师"):
+def therapist_select_options(include_blank=True, blank_text=""):
     therapists = [str(t).strip() for t in st.session_state.therapists if str(t).strip()]
     if include_blank:
         return [blank_text] + therapists
@@ -131,13 +131,23 @@ def append_row_to_sheet(worksheet, row_data):
 
 
 def update_row_in_sheet(worksheet, row_number, row_data):
-    cell_range = f"A{row_number}:K{row_number}"
+    cell_range = f"A{row_number}:J{row_number}"
     worksheet.update(cell_range, [row_data])
+
+
+def delete_rows_from_sheet(worksheet, row_numbers):
+    for row_num in sorted(row_numbers, reverse=True):
+        worksheet.delete_rows(int(row_num))
 
 
 def save_local_update(df_local, row_index, row_dict):
     for key, value in row_dict.items():
         df_local.at[row_index, key] = value
+    return df_local
+
+
+def delete_local_rows(df_local, row_ids):
+    df_local = df_local.drop(index=row_ids, errors="ignore").reset_index(drop=True)
     return df_local
 
 
@@ -217,7 +227,7 @@ with st.sidebar:
 df = refresh_data(worksheet)
 
 # -----------------------------
-# 录入区
+# 新增记录
 # -----------------------------
 st.header("新增每日收支记录")
 
@@ -233,20 +243,21 @@ with st.form("entry_form", clear_on_submit=False):
         duration = st.selectbox("治疗师工作时间", list(DURATION_RATE_MAP.keys()))
 
     with c3:
+        therapist_name = st.selectbox(
+            "治疗师姓名",
+            therapist_select_options(include_blank=True, blank_text=""),
+            index=0,
+            key="entry_therapist_name",
+        )
         total_revenue = st.number_input("总收入 ($)", min_value=0.0, step=1.0, format="%.2f")
-        tip = st.number_input("小费 Tip ($)", min_value=0.0, step=1.0, format="%.2f")
 
-    notes = st.text_input("备注")
+    tip = st.number_input("小费 Tip ($)", min_value=0.0, step=1.0, format="%.2f")
 
     if payment_type == "pc":
-        st.info("PC 类型不需要填写治疗师姓名。")
         therapist_name = ""
         therapist_income = 0.0
+        st.info("PC 类型不关联治疗师，治疗师收入自动为 0。")
     else:
-        therapist_options = therapist_select_options()
-        therapist_name = st.selectbox("治疗师姓名", therapist_options, key="entry_therapist_name")
-        if therapist_name == "请选择治疗师":
-            therapist_name = ""
         auto_income = DURATION_RATE_MAP[duration]
         therapist_income = st.number_input(
             "治疗师收入 ($)",
@@ -263,20 +274,19 @@ with st.form("entry_form", clear_on_submit=False):
     submitted = st.form_submit_button("保存记录")
 
     if submitted:
-        if payment_type != "pc" and not therapist_name:
+        if payment_type != "pc" and not str(therapist_name).strip():
             st.error("请选择治疗师姓名")
         else:
             row = {
                 "date": str(entry_date),
                 "payment_type": payment_type,
-                "therapist_name": therapist_name,
+                "therapist_name": therapist_name.strip(),
                 "client_name": client_name.strip(),
                 "duration": duration,
                 "therapist_income": float(therapist_income),
                 "tip": float(tip),
                 "total_revenue": float(total_revenue),
                 "profit": float(profit),
-                "notes": notes.strip(),
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
 
@@ -290,7 +300,6 @@ with st.form("entry_form", clear_on_submit=False):
                 row["tip"],
                 row["total_revenue"],
                 row["profit"],
-                row["notes"],
                 row["created_at"],
             ]
 
@@ -303,7 +312,7 @@ with st.form("entry_form", clear_on_submit=False):
                         [st.session_state.local_data, pd.DataFrame([row])],
                         ignore_index=True
                     )
-                    st.success("记录已保存到本地会话（未连接 Google Sheets）。")
+                    st.success("记录已保存到本地会话。")
                 st.rerun()
             except Exception as e:
                 st.error(f"保存失败：{e}")
@@ -350,7 +359,6 @@ else:
         st.warning("没有找到符合条件的记录。")
     else:
         edit_df = edit_df.sort_values(["date", "client_name"], ascending=[False, True]).copy()
-
         edit_df["record_label"] = edit_df.apply(
             lambda r: f"{r['day']} | {r['client_name']} | {r['payment_type']} | {r['therapist_name']} | ${r['total_revenue']:.2f}",
             axis=1
@@ -380,6 +388,15 @@ else:
                 new_duration = st.selectbox("治疗师工作时间", duration_options, index=duration_index, key="edit_duration")
 
             with ec3:
+                therapist_options = therapist_select_options(include_blank=True, blank_text="")
+                old_therapist = str(selected_row["therapist_name"]).strip()
+                default_therapist_index = therapist_options.index(old_therapist) if old_therapist in therapist_options else 0
+                new_therapist_name = st.selectbox(
+                    "治疗师姓名",
+                    therapist_options,
+                    index=default_therapist_index,
+                    key="edit_therapist_name"
+                )
                 new_total_revenue = st.number_input(
                     "总收入 ($)",
                     min_value=0.0,
@@ -388,38 +405,23 @@ else:
                     format="%.2f",
                     key="edit_total_revenue"
                 )
-                new_tip = st.number_input(
-                    "小费 Tip ($)",
-                    min_value=0.0,
-                    value=float(selected_row["tip"]),
-                    step=1.0,
-                    format="%.2f",
-                    key="edit_tip"
-                )
 
-            new_notes = st.text_input("备注", value=str(selected_row["notes"]), key="edit_notes")
+            new_tip = st.number_input(
+                "小费 Tip ($)",
+                min_value=0.0,
+                value=float(selected_row["tip"]),
+                step=1.0,
+                format="%.2f",
+                key="edit_tip"
+            )
 
             if new_payment_type == "pc":
-                st.info("PC 类型不需要填写治疗师姓名。")
                 new_therapist_name = ""
                 new_therapist_income = 0.0
+                st.info("PC 类型不关联治疗师，治疗师收入自动为 0。")
             else:
-                therapist_options = therapist_select_options()
-                old_therapist = str(selected_row["therapist_name"]).strip()
-                default_therapist_index = therapist_options.index(old_therapist) if old_therapist in therapist_options else 0
-
-                new_therapist_name = st.selectbox(
-                    "治疗师姓名",
-                    therapist_options,
-                    index=default_therapist_index,
-                    key="edit_therapist_name"
-                )
-                if new_therapist_name == "请选择治疗师":
-                    new_therapist_name = ""
-
                 auto_income = DURATION_RATE_MAP.get(new_duration, 0.0)
                 default_income = float(selected_row["therapist_income"]) if pd.notna(selected_row["therapist_income"]) else float(auto_income)
-
                 new_therapist_income = st.number_input(
                     "治疗师收入 ($)",
                     min_value=0.0,
@@ -435,20 +437,19 @@ else:
             update_submitted = st.form_submit_button("保存修改")
 
             if update_submitted:
-                if new_payment_type != "pc" and not new_therapist_name:
+                if new_payment_type != "pc" and not str(new_therapist_name).strip():
                     st.error("请选择治疗师姓名")
                 else:
                     updated_row = {
                         "date": str(new_date),
                         "payment_type": new_payment_type,
-                        "therapist_name": new_therapist_name,
+                        "therapist_name": str(new_therapist_name).strip(),
                         "client_name": new_client_name.strip(),
                         "duration": new_duration,
                         "therapist_income": float(new_therapist_income),
                         "tip": float(new_tip),
                         "total_revenue": float(new_total_revenue),
                         "profit": float(new_profit),
-                        "notes": new_notes.strip(),
                         "created_at": str(selected_row["created_at"]),
                     }
 
@@ -462,7 +463,6 @@ else:
                         updated_row["tip"],
                         updated_row["total_revenue"],
                         updated_row["profit"],
-                        updated_row["notes"],
                         updated_row["created_at"],
                     ]
 
@@ -482,6 +482,93 @@ else:
                         st.rerun()
                     except Exception as e:
                         st.error(f"修改失败：{e}")
+
+# -----------------------------
+# 删除错误记录
+# -----------------------------
+st.header("删除错误记录")
+
+if df.empty:
+    st.info("目前没有可删除的数据。")
+else:
+    del_col1, del_col2, del_col3 = st.columns(3)
+
+    with del_col1:
+        delete_date_options = ["全部"] + sorted(df["day"].dropna().unique().tolist(), reverse=True)
+        selected_delete_date = st.selectbox("按日期筛选删除", delete_date_options, key="delete_date_filter")
+
+    with del_col2:
+        delete_therapist_values = sorted([x for x in df["therapist_name"].dropna().astype(str).unique().tolist() if x.strip()])
+        delete_therapist_options = ["全部"] + delete_therapist_values
+        selected_delete_therapist = st.selectbox("按治疗师筛选删除", delete_therapist_options, key="delete_therapist_filter")
+
+    with del_col3:
+        delete_client_keyword = st.text_input("按客人姓名搜索删除", key="delete_client_keyword")
+
+    delete_df = df.copy()
+
+    if selected_delete_date != "全部":
+        delete_df = delete_df[delete_df["day"] == selected_delete_date]
+
+    if selected_delete_therapist != "全部":
+        delete_df = delete_df[delete_df["therapist_name"] == selected_delete_therapist]
+
+    if delete_client_keyword.strip():
+        delete_df = delete_df[
+            delete_df["client_name"].astype(str).str.contains(delete_client_keyword.strip(), case=False, na=False)
+        ]
+
+    if delete_df.empty:
+        st.warning("没有找到可删除的记录。")
+    else:
+        delete_df = delete_df.sort_values(["date", "client_name"], ascending=[False, True]).copy()
+        delete_df["选择删除"] = False
+
+        delete_show_cols = [
+            "选择删除", "day", "payment_type", "therapist_name", "client_name",
+            "duration", "therapist_income", "tip", "total_revenue", "profit"
+        ]
+
+        edited_delete_df = st.data_editor(
+            delete_df[delete_show_cols + ["row_id", "sheet_row_number"]].copy(),
+            hide_index=True,
+            use_container_width=True,
+            disabled=[
+                "day", "payment_type", "therapist_name", "client_name",
+                "duration", "therapist_income", "tip", "total_revenue", "profit",
+                "row_id", "sheet_row_number"
+            ],
+            column_config={
+                "row_id": None,
+                "sheet_row_number": None,
+            },
+            key="delete_data_editor"
+        )
+
+        selected_rows = edited_delete_df[edited_delete_df["选择删除"] == True].copy()
+
+        if not selected_rows.empty:
+            st.warning(f"已勾选 {len(selected_rows)} 条记录，删除后无法恢复。")
+
+        if st.button("删除勾选记录", type="primary"):
+            if selected_rows.empty:
+                st.error("请先勾选要删除的记录。")
+            else:
+                try:
+                    if worksheet is not None:
+                        row_numbers = selected_rows["sheet_row_number"].dropna().astype(int).tolist()
+                        delete_rows_from_sheet(worksheet, row_numbers)
+                        st.success(f"已删除 {len(row_numbers)} 条 Google Sheets 记录。")
+                    else:
+                        row_ids = selected_rows["row_id"].astype(int).tolist()
+                        st.session_state.local_data = delete_local_rows(
+                            st.session_state.local_data.copy(),
+                            row_ids
+                        )
+                        st.success(f"已删除 {len(row_ids)} 条本地记录。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"删除失败：{e}")
 
 # -----------------------------
 # 汇总显示
@@ -564,7 +651,7 @@ else:
 
             detail_cols = [
                 "day", "client_name", "payment_type", "duration",
-                "therapist_income", "tip", "total_revenue", "notes"
+                "therapist_income", "tip", "total_revenue"
             ]
             st.dataframe(therapist_month_df[detail_cols], use_container_width=True)
         else:
@@ -594,10 +681,16 @@ else:
                     total_revenue=("total_revenue", "sum"),
                 )
 
+                monthly_total_revenue = float(print_df["total_revenue"].sum())
+                monthly_total_income = float(print_df["therapist_income"].sum())
+                monthly_total_tip = float(print_df["tip"].sum())
+                monthly_total_clients = int(len(print_df))
+
                 st.markdown(f"### {print_therapist} - {print_month} 工资核对单")
-                st.write(f"月工资合计：${print_df['therapist_income'].sum():,.2f}")
-                st.write(f"月小费合计：${print_df['tip'].sum():,.2f}")
-                st.write(f"月客人数：{len(print_df)}")
+                st.write(f"月总收入 Total Revenue：${monthly_total_revenue:,.2f}")
+                st.write(f"月工资合计 Therapist Income：${monthly_total_income:,.2f}")
+                st.write(f"月小费合计 Tip：${monthly_total_tip:,.2f}")
+                st.write(f"月客人数 Client Count：{monthly_total_clients}")
 
                 st.markdown("#### 每日汇总")
                 st.dataframe(grouped, use_container_width=True)
@@ -605,11 +698,28 @@ else:
                 st.markdown("#### 每日客人明细")
                 display_cols = [
                     "day", "client_name", "payment_type", "duration",
-                    "therapist_income", "tip", "total_revenue", "notes"
+                    "therapist_income", "tip", "total_revenue"
                 ]
                 st.dataframe(print_df[display_cols], use_container_width=True)
 
-                csv_data = print_df[display_cols].to_csv(index=False).encode("utf-8-sig")
+                summary_df = pd.DataFrame([
+                    ["月份", print_month],
+                    ["治疗师", print_therapist],
+                    ["本月总收入 Total Revenue", monthly_total_revenue],
+                    ["本月治疗师收入 Therapist Income", monthly_total_income],
+                    ["本月小费 Tip", monthly_total_tip],
+                    ["本月客人数 Client Count", monthly_total_clients],
+                ], columns=["项目", "数值"])
+
+                detail_df = print_df[display_cols].copy()
+
+                csv_text = (
+                    summary_df.to_csv(index=False)
+                    + "\n"
+                    + detail_df.to_csv(index=False)
+                )
+                csv_data = csv_text.encode("utf-8-sig")
+
                 st.download_button(
                     label="下载该治疗师该月明细 CSV",
                     data=csv_data,
@@ -630,9 +740,10 @@ else:
                 </head>
                 <body>
                     <h1>{print_therapist} - {print_month} 工资核对单</h1>
-                    <p>月工资合计: ${print_df['therapist_income'].sum():,.2f}</p>
-                    <p>月小费合计: ${print_df['tip'].sum():,.2f}</p>
-                    <p>月客人数: {len(print_df)}</p>
+                    <p>月总收入 Total Revenue: ${monthly_total_revenue:,.2f}</p>
+                    <p>月工资合计 Therapist Income: ${monthly_total_income:,.2f}</p>
+                    <p>月小费合计 Tip: ${monthly_total_tip:,.2f}</p>
+                    <p>月客人数 Client Count: {monthly_total_clients}</p>
                     {print_df[display_cols].to_html(index=False)}
                 </body>
                 </html>
@@ -695,7 +806,7 @@ st.header("原始记录")
 if not df.empty:
     show_cols = [
         "date", "payment_type", "therapist_name", "client_name", "duration",
-        "therapist_income", "tip", "total_revenue", "profit", "notes", "created_at"
+        "therapist_income", "tip", "total_revenue", "profit", "created_at"
     ]
     st.dataframe(df[show_cols].sort_values("date", ascending=False), use_container_width=True)
 else:

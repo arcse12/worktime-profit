@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "massageworklog",
+  "private_key_id": "47276019430928614bc6482ddaafbf4875e8d2d9",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDZ7VlGivH3CqdP\ncCu/MOlqQIUPK5jpVVhnSVaKe6Mg5vhKJCa3wdeZxwAvoHJlFRcp039G4OUzmguv\nYTI/8kDBpEB54K57jZ69pUnLxU7M8IEaSFfpcS6uATt7kAEeoc1EJilrkHvkPkMe\ngTcsOc8EdaEY3eOS7fUthisJGt3jD4IYpXfnRXDhfnFkvH4cpUImKZuOIOWInY3g\n1leVbv50lpwlmtZQHmpYVRC/U9yBUm2Tcf1jxUlWJt5cWZF+liByjK62oiVtI08L\nB319Y8Cea1fKnIj9DVlefh0q0XBhSiDaQtipVGvoWVW/226KN63mu3NCZOepMS2E\ncjFB5UTxAgMBAAECggEAKpyIxMzdVBc+sL83ppo7Qb3c5qL5MsKv1v5VkB1tv7y5\n1tFryql57UUmial/RLmTfmeu7t6Boo3f9Ap2x18of1SNEOe4ZktCO0XLAK+TYWoz\nbD6yBeDOJlLyXQ5C0ckEeGtX1QL63p24BQpyDdE949rWRaT5XxztQFoIJy8cLM3a\nf8pRPSiN5T1ZrpdOefVTIjfe8EMsvv/gb0wK35ynvzXl6CuR7SAyH/rwi5wOgkWJ\nI+CJ56p6tf8UgQTdNQ1fGXvzXA3vyNu+N6hBvAqrwHNV7IJwzmZOnV6L1/xE76/j\n9of+Ssfp7mJmd8mWHhefXp4v/u2zDpeuI37Wooh9awKBgQD4TAiXNpGP9hZSGKO8\nErfOVnyQ8U+1psap1DnzyuSYOEdpacpXAddogazMSMs0IHsxihW7+htMeh/mTvMB\npnAlxEtQZ0jYOeSEN6ANYsK3NkSROkziEmV8A8QOF93Qc1LB2ozxLHXqldrH0by0\ngJCJU9iVBEWH1VmTMBzrWQ9NzwKBgQDgsB5mf8g+k9xpfo9NZUctzLgdo2raUM0f\nidRaXmcNXnKivEOvU9Qh3mMintDu+MSMJcZMvF9lCr0NfG//JmDPPia93yFJycOj\n6XCKLbMHzmTWfSAmRooT/7yU7ofZL4FpZg41LyxNg9TzEmNKewJ669B3egz+1OBU\nDjaGepuxPwKBgCi+QUKe36/hz7PU+zknUSX4pyQZlNzX6w1/F6tbhbs8sOspQtyY\nHsK1VKeI4l9BXTW51OstlUEtYQKnvdRtfUWVOk6NRDTG+yp+/jJ0HEN4EjRKfscy\nAZkh/Q/a9rj304Kf3DTO+OJviKD1V6O+3PjL22RIeSha6AHxCS3NRWedAoGBAKop\nl4xm399MmdOnTp39wq9T6GhB1+2o3gAxoQojjoYYblcCn3wLz48q3gddIbyp2CiP\nfyOkUdazEERDZopkpVKuriaD8rDwReNAKsPrIjgaPlIWhx+VsoK83jQoheecy7Rn\n3wC2TiYSXlcMKPhCOrmfF800ON1RmObvsKmd94V/AoGAX63tXrqxCnaKo7cAfJC3\nXMhnzH4DMmRTq3lA3AsSfsdMVTUJPilM6bZIATsNPGnUIjr+CU9sVZ+uXMAwPRKH\ngh2vkX4RtDPb0q3jzjU8dMNwf0tH4HWxIMTMylY9IsSGSwVbrYdvaiERaIrIRKxL\nsCTRr0GcGiKKAkUx5SSEfII=\n-----END PRIVATE KEY-----\n",
+  "client_email": "streamlit-worklog@massageworklog.iam.gserviceaccount.com",
+  "client_id": "106439537068770428369",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/streamlit-worklog%40massageworklog.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

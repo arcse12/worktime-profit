@@ -127,6 +127,13 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[required_columns]
 
 
+def therapist_select_options(include_blank=True, blank_text="请选择治疗师"):
+    therapists = [str(t).strip() for t in st.session_state.therapists if str(t).strip()]
+    if include_blank:
+        return [blank_text] + therapists
+    return therapists
+
+
 def load_data_from_sheet(worksheet):
     try:
         records = worksheet.get_all_records()
@@ -251,52 +258,24 @@ with st.form("entry_form", clear_on_submit=False):
 
     notes = st.text_input("备注")
 
-    st.markdown("### 治疗师")
-    therapist_options = st.session_state.therapists + ["(手动新增治疗师)"]
-
     if payment_type == "pc":
-        st.info("PC 类型可以不选择治疗师；如果这单需要记到某位治疗师名下，也可以选择治疗师。")
-        therapist_mode = st.radio("PC 是否关联治疗师", ["不关联治疗师", "关联治疗师"], horizontal=True)
-        if therapist_mode == "关联治疗师":
-            tc1, tc2 = st.columns(2)
-            with tc1:
-                selected_therapist = st.selectbox("治疗师姓名（可选择或新增）", therapist_options, key="pc_selected_therapist")
-                if selected_therapist == "(手动新增治疗师)":
-                    therapist_name = st.text_input("输入新治疗师姓名", key="pc_new_therapist_name").strip()
-                else:
-                    therapist_name = selected_therapist
-            with tc2:
-                auto_income = DURATION_RATE_MAP[duration]
-                therapist_income = st.number_input(
-                    "治疗师收入 ($)",
-                    min_value=0.0,
-                    value=float(auto_income),
-                    step=1.0,
-                    format="%.2f",
-                    help="默认按时长自动带出，也可手动修改。"
-                )
-        else:
-            therapist_name = ""
-            therapist_income = 0.0
+        st.info("PC 类型不需要填写治疗师姓名。")
+        therapist_name = ""
+        therapist_income = 0.0
     else:
-        st.info("当前付款类型必须选择治疗师。")
-        tc1, tc2 = st.columns(2)
-        with tc1:
-            selected_therapist = st.selectbox("治疗师姓名（可选择或新增）", therapist_options, key="normal_selected_therapist")
-            if selected_therapist == "(手动新增治疗师)":
-                therapist_name = st.text_input("输入新治疗师姓名", key="normal_new_therapist_name").strip()
-            else:
-                therapist_name = selected_therapist
-        with tc2:
-            auto_income = DURATION_RATE_MAP[duration]
-            therapist_income = st.number_input(
-                "治疗师收入 ($)",
-                min_value=0.0,
-                value=float(auto_income),
-                step=1.0,
-                format="%.2f",
-                help="默认按时长自动带出，也可手动修改。"
-            )
+        therapist_options = therapist_select_options()
+        therapist_name = st.selectbox("治疗师姓名", therapist_options, key="entry_therapist_name")
+        if therapist_name == "请选择治疗师":
+            therapist_name = ""
+        auto_income = DURATION_RATE_MAP[duration]
+        therapist_income = st.number_input(
+            "治疗师收入 ($)",
+            min_value=0.0,
+            value=float(auto_income),
+            step=1.0,
+            format="%.2f",
+            help="默认按时长自动带出，也可手动修改。"
+        )
 
     profit = float(total_revenue) - float(therapist_income) - float(tip)
     st.markdown(f"### 利润 Profit: **${profit:.2f}**")
@@ -304,11 +283,9 @@ with st.form("entry_form", clear_on_submit=False):
     submitted = st.form_submit_button("保存记录")
 
     if submitted:
-        if payment_type != "pc" and not therapist_name:
-            st.error("除 PC 外，所有客人都必须选择治疗师。")
+        if not therapist_name and not (payment_type == "pc" and therapist_mode == "不关联治疗师"):
+            st.error("请选择治疗师姓名")
         else:
-            if therapist_name and therapist_name not in st.session_state.therapists:
-                st.session_state.therapists.append(therapist_name)
             row = {
                 "date": str(entry_date),
                 "payment_type": payment_type,
@@ -427,7 +404,7 @@ else:
 
     with query_tab1:
         st.subheader("查询该治疗师这个月工资总共多少")
-        therapists_for_query = sorted([t for t in df["therapist_name"].dropna().unique().tolist() if str(t).strip() != ""])
+        therapists_for_query = therapist_select_options(include_blank=False)
         months_for_query = sorted(df["month"].dropna().unique().tolist(), reverse=True)
 
         if therapists_for_query and months_for_query:
@@ -460,7 +437,7 @@ else:
 
     with query_tab2:
         st.subheader("打印该月每天该治疗师的客人名单与收入")
-        therapists_for_print = sorted([t for t in df["therapist_name"].dropna().unique().tolist() if str(t).strip() != ""])
+        therapists_for_print = therapist_select_options(include_blank=False)
         months_for_print = sorted(df["month"].dropna().unique().tolist(), reverse=True)
 
         if therapists_for_print and months_for_print:
@@ -577,102 +554,6 @@ else:
             st.dataframe(year_monthly_profit, use_container_width=True)
 
 # -----------------------------
-# 修改记录
-# -----------------------------
-st.header("修改记录")
-if df.empty:
-    st.info("目前没有可修改的记录。")
-else:
-    edit_df = df.copy().sort_values(["date", "created_at"], ascending=[False, False]).reset_index(drop=True)
-    edit_df["record_label"] = edit_df.apply(
-        lambda r: f"{str(r['date'])[:10]} | {r['client_name']} | {r['payment_type']} | {r['therapist_name']} | ${float(r['total_revenue']):.2f}",
-        axis=1
-    )
-
-    selected_label = st.selectbox("选择要修改的记录", edit_df["record_label"].tolist())
-    selected_row = edit_df[edit_df["record_label"] == selected_label].iloc[0]
-    selected_index = int(selected_row.name)
-
-    with st.form("edit_form"):
-        ec1, ec2, ec3 = st.columns(3)
-        with ec1:
-            edit_date = st.date_input("修改日期", value=pd.to_datetime(selected_row["date"]).date(), key="edit_date")
-            edit_payment_type = st.selectbox("修改付款类型", PAYMENT_OPTIONS, index=PAYMENT_OPTIONS.index(selected_row["payment_type"]) if selected_row["payment_type"] in PAYMENT_OPTIONS else 0, key="edit_payment_type")
-        with ec2:
-            edit_client_name = st.text_input("修改客人姓名", value=str(selected_row["client_name"]), key="edit_client_name")
-            duration_options = list(DURATION_RATE_MAP.keys())
-            edit_duration = st.selectbox("修改治疗时长", duration_options, index=duration_options.index(selected_row["duration"]) if selected_row["duration"] in duration_options else 0, key="edit_duration")
-        with ec3:
-            edit_total_revenue = st.number_input("修改总收入 ($)", min_value=0.0, value=float(selected_row["total_revenue"]), step=1.0, format="%.2f", key="edit_total_revenue")
-            edit_tip = st.number_input("修改小费 ($)", min_value=0.0, value=float(selected_row["tip"]), step=1.0, format="%.2f", key="edit_tip")
-
-        edit_notes = st.text_input("修改备注", value=str(selected_row["notes"]), key="edit_notes")
-
-        if edit_payment_type == "pc":
-            edit_therapist_mode = st.radio(
-                "PC 是否关联治疗师",
-                ["不关联治疗师", "关联治疗师"],
-                horizontal=True,
-                index=1 if str(selected_row["therapist_name"]).strip() else 0,
-                key="edit_pc_mode"
-            )
-            if edit_therapist_mode == "关联治疗师":
-                therapist_options = st.session_state.therapists
-                default_idx = therapist_options.index(selected_row["therapist_name"]) if selected_row["therapist_name"] in therapist_options else 0
-                edit_therapist_name = st.selectbox("修改治疗师姓名", therapist_options, index=default_idx, key="edit_pc_therapist_name")
-                default_income = float(selected_row["therapist_income"])
-                edit_therapist_income = st.number_input("修改治疗师收入 ($)", min_value=0.0, value=default_income, step=1.0, format="%.2f", key="edit_pc_therapist_income")
-            else:
-                edit_therapist_name = ""
-                edit_therapist_income = 0.0
-        else:
-            therapist_options = st.session_state.therapists
-            default_idx = therapist_options.index(selected_row["therapist_name"]) if selected_row["therapist_name"] in therapist_options else 0
-            edit_therapist_name = st.selectbox("修改治疗师姓名", therapist_options, index=default_idx, key="edit_therapist_name")
-            edit_therapist_income = st.number_input(
-                "修改治疗师收入 ($)",
-                min_value=0.0,
-                value=float(selected_row["therapist_income"]),
-                step=1.0,
-                format="%.2f",
-                key="edit_therapist_income"
-            )
-
-        edit_profit = float(edit_total_revenue) - float(edit_therapist_income) - float(edit_tip)
-        st.markdown(f"### 修改后利润 Profit: **${edit_profit:.2f}**")
-
-        save_edit = st.form_submit_button("保存修改")
-
-        if save_edit:
-            updated_row = {
-                "date": str(edit_date),
-                "payment_type": edit_payment_type,
-                "therapist_name": edit_therapist_name,
-                "client_name": edit_client_name.strip(),
-                "duration": edit_duration,
-                "therapist_income": float(edit_therapist_income),
-                "tip": float(edit_tip),
-                "total_revenue": float(edit_total_revenue),
-                "profit": float(edit_profit),
-                "notes": edit_notes,
-                "created_at": str(selected_row["created_at"]),
-            }
-
-            if worksheet is None:
-                local_df = st.session_state.local_data.copy()
-                if not local_df.empty:
-                    local_df = ensure_columns(local_df)
-                    local_df = local_df.reset_index(drop=True)
-                    if selected_index < len(local_df):
-                        for col, val in updated_row.items():
-                            local_df.at[selected_index, col] = val
-                        st.session_state.local_data = local_df
-                        st.success("记录已修改。")
-                        st.rerun()
-            else:
-                st.warning("当前版本 Google Sheets 已支持新增记录。修改已先在界面准备好；如你需要，我可以继续帮你加上同步修改 Google Sheets 原记录功能。")
-
-# -----------------------------
 # 原始记录
 # -----------------------------
 st.header("原始记录")
@@ -681,6 +562,6 @@ if not df.empty:
         "date", "payment_type", "therapist_name", "client_name", "duration",
         "therapist_income", "tip", "total_revenue", "profit", "notes", "created_at"
     ]
-    st.dataframe(df[show_cols].sort_values(["date", "created_at"], ascending=[False, False]), use_container_width=True)
+    st.dataframe(df[show_cols].sort_values("date", ascending=False), use_container_width=True)
 
 

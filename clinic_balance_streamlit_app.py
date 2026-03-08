@@ -251,10 +251,33 @@ with st.form("entry_form", clear_on_submit=False):
 
     notes = st.text_input("备注")
 
+    st.markdown("### 治疗师")
     if payment_type == "pc":
+        st.info("PC 类型可以不选择治疗师；如果这单也要记到某位治疗师名下，可以手动选择。")
         therapist_mode = st.radio("PC 是否关联治疗师", ["不关联治疗师", "关联治疗师"], horizontal=True)
         if therapist_mode == "关联治疗师":
-            therapist_name = st.selectbox("治疗师姓名", st.session_state.therapists, key="pc_therapist_name")
+            tc1, tc2 = st.columns(2)
+            with tc1:
+                therapist_name = st.selectbox("治疗师姓名", st.session_state.therapists, key="pc_therapist_name")
+            with tc2:
+                auto_income = DURATION_RATE_MAP[duration]
+                therapist_income = st.number_input(
+                    "治疗师收入 ($)",
+                    min_value=0.0,
+                    value=float(auto_income),
+                    step=1.0,
+                    format="%.2f",
+                    help="PC 也可以手动选择治疗师并记录工资。"
+                )
+        else:
+            therapist_name = ""
+            therapist_income = 0.0
+    else:
+        st.info("当前付款类型必须选择治疗师。")
+        tc1, tc2 = st.columns(2)
+        with tc1:
+            therapist_name = st.selectbox("治疗师姓名", st.session_state.therapists, key="normal_therapist_name")
+        with tc2:
             auto_income = DURATION_RATE_MAP[duration]
             therapist_income = st.number_input(
                 "治疗师收入 ($)",
@@ -262,24 +285,8 @@ with st.form("entry_form", clear_on_submit=False):
                 value=float(auto_income),
                 step=1.0,
                 format="%.2f",
-                help="PC 也可以手动选择治疗师并记录工资。"
+                help="默认按时长自动带出，也可手动修改。"
             )
-        else:
-            st.info("PC 类型可以不选择治疗师；如果这单也要记到某位治疗师名下，可以手动选择。")
-            therapist_name = ""
-            therapist_income = 0.0
-    else:
-        st.info("当前付款类型必须选择治疗师。")
-        therapist_name = st.selectbox("治疗师姓名", st.session_state.therapists)
-        auto_income = DURATION_RATE_MAP[duration]
-        therapist_income = st.number_input(
-            "治疗师收入 ($)",
-            min_value=0.0,
-            value=float(auto_income),
-            step=1.0,
-            format="%.2f",
-            help="默认按时长自动带出，也可手动修改。"
-        )
 
     profit = float(total_revenue) - float(therapist_income) - float(tip)
     st.markdown(f"### 利润 Profit: **${profit:.2f}**")
@@ -663,5 +670,4 @@ if not df.empty:
         "therapist_income", "tip", "total_revenue", "profit", "notes", "created_at"
     ]
     st.dataframe(df[show_cols].sort_values(["date", "created_at"], ascending=[False, False]), use_container_width=True)
-
 

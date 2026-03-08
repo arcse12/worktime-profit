@@ -27,7 +27,7 @@ DURATION_RATE_MAP = {
     "105 min": 113.75,
     "120 min": 130.0,
 }
-DEFAULT_THERAPISTS = ["Jenny", "Bonnie", "Sophia","Nancy","Martha","Ammabelle","Le Ann","Domingo"]
+DEFAULT_THERAPISTS = ["Jenny", "Janice", "Alex"]
 
 SPREADSHEET_NAME = "massageprofit"
 WORKSHEET_NAME = "transactions"
@@ -50,7 +50,6 @@ BASE_COLUMNS = [
     "profit",
     "created_at",
 ]
-
 
 # -----------------------------
 # Google Sheets 连接函数
@@ -227,7 +226,6 @@ if "therapists" not in st.session_state:
 if "local_data" not in st.session_state:
     st.session_state.local_data = pd.DataFrame(columns=BASE_COLUMNS)
 
-
 # -----------------------------
 # 侧边栏
 # -----------------------------
@@ -276,12 +274,10 @@ with st.sidebar:
     for i, t in enumerate(st.session_state.therapists, start=1):
         st.write(f"{i}. {t}")
 
-
 # -----------------------------
 # 数据载入
 # -----------------------------
 df = refresh_data(worksheet)
-
 
 # -----------------------------
 # 新增记录
@@ -374,9 +370,7 @@ with st.form("entry_form", clear_on_submit=False):
             except Exception as e:
                 st.error(f"保存失败：{e}")
 
-
 df = refresh_data(worksheet)
-
 
 # -----------------------------
 # 修改错误记录
@@ -386,7 +380,7 @@ st.header("修改错误记录")
 if df.empty:
     st.info("目前没有可修改的数据。")
 else:
-    edit_filter_col1, edit_filter_col2, edit_filter_col3 = st.columns(3)
+    edit_filter_col1, edit_filter_col2, edit_filter_col3, edit_filter_col4 = st.columns(4)
 
     with edit_filter_col1:
         edit_date_options = ["全部"] + sorted(df["day"].dropna().unique().tolist(), reverse=True) if "day" in df.columns else ["全部"]
@@ -400,6 +394,10 @@ else:
     with edit_filter_col3:
         client_keyword = st.text_input("按客人姓名搜索", key="edit_client_keyword")
 
+    with edit_filter_col4:
+        edit_payment_options = ["全部"] + PAYMENT_OPTIONS
+        selected_edit_payment = st.selectbox("按付款方式筛选", edit_payment_options, key="edit_payment_filter")
+
     edit_df = df.copy()
 
     if selected_edit_date != "全部" and "day" in edit_df.columns:
@@ -407,6 +405,9 @@ else:
 
     if selected_edit_therapist != "全部":
         edit_df = edit_df[edit_df["therapist_name"] == selected_edit_therapist]
+
+    if selected_edit_payment != "全部":
+        edit_df = edit_df[edit_df["payment_type"] == selected_edit_payment]
 
     if client_keyword.strip():
         edit_df = edit_df[
@@ -541,7 +542,6 @@ else:
                     except Exception as e:
                         st.error(f"修改失败：{e}")
 
-
 # -----------------------------
 # 删除错误记录
 # -----------------------------
@@ -550,7 +550,7 @@ st.header("删除错误记录")
 if df.empty:
     st.info("目前没有可删除的数据。")
 else:
-    del_col1, del_col2, del_col3 = st.columns(3)
+    del_col1, del_col2, del_col3, del_col4 = st.columns(4)
 
     with del_col1:
         delete_date_options = ["全部"] + sorted(df["day"].dropna().unique().tolist(), reverse=True)
@@ -564,6 +564,10 @@ else:
     with del_col3:
         delete_client_keyword = st.text_input("按客人姓名搜索删除", key="delete_client_keyword")
 
+    with del_col4:
+        delete_payment_options = ["全部"] + PAYMENT_OPTIONS
+        selected_delete_payment = st.selectbox("按付款方式筛选删除", delete_payment_options, key="delete_payment_filter")
+
     delete_df = df.copy()
 
     if selected_delete_date != "全部":
@@ -571,6 +575,9 @@ else:
 
     if selected_delete_therapist != "全部":
         delete_df = delete_df[delete_df["therapist_name"] == selected_delete_therapist]
+
+    if selected_delete_payment != "全部":
+        delete_df = delete_df[delete_df["payment_type"] == selected_delete_payment]
 
     if delete_client_keyword.strip():
         delete_df = delete_df[
@@ -629,7 +636,6 @@ else:
                 except Exception as e:
                     st.error(f"删除失败：{e}")
 
-
 # -----------------------------
 # 汇总显示
 # -----------------------------
@@ -669,7 +675,6 @@ else:
 
     with tab3:
         st.dataframe(yearly_summary, use_container_width=True)
-
 
 # -----------------------------
 # 查询功能
@@ -856,16 +861,44 @@ else:
             ).sort_values("month")
             st.dataframe(year_monthly_profit, use_container_width=True)
 
-
 # -----------------------------
 # 原始记录
 # -----------------------------
 st.header("原始记录")
+
 if not df.empty:
+    raw_col1, raw_col2, raw_col3 = st.columns(3)
+
+    with raw_col1:
+        raw_therapist_options = ["全部"] + sorted(
+            [x for x in df["therapist_name"].dropna().astype(str).unique().tolist() if x.strip()]
+        )
+        selected_raw_therapist = st.selectbox("按治疗师查询", raw_therapist_options, key="raw_therapist_filter")
+
+    with raw_col2:
+        raw_payment_options = ["全部"] + PAYMENT_OPTIONS
+        selected_raw_payment = st.selectbox("按付款方式查询", raw_payment_options, key="raw_payment_filter")
+
+    with raw_col3:
+        raw_client_keyword = st.text_input("按客人姓名查询", key="raw_client_filter")
+
+    raw_df = df.copy()
+
+    if selected_raw_therapist != "全部":
+        raw_df = raw_df[raw_df["therapist_name"] == selected_raw_therapist]
+
+    if selected_raw_payment != "全部":
+        raw_df = raw_df[raw_df["payment_type"] == selected_raw_payment]
+
+    if raw_client_keyword.strip():
+        raw_df = raw_df[
+            raw_df["client_name"].astype(str).str.contains(raw_client_keyword.strip(), case=False, na=False)
+        ]
+
     show_cols = [
         "date", "payment_type", "therapist_name", "client_name", "duration",
         "therapist_income", "tip", "total_revenue", "profit", "created_at"
     ]
-    st.dataframe(df[show_cols].sort_values("date", ascending=False), use_container_width=True)
+    st.dataframe(raw_df[show_cols].sort_values("date", ascending=False), use_container_width=True)
 else:
     st.info("暂无原始记录。")

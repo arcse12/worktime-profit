@@ -3,6 +3,10 @@ from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+<<<<<<< HEAD
+=======
+
+>>>>>>> ea96d3306d47bcc36646269610add2639f8d14af
 
 # Optional Google Sheets imports
 try:
@@ -307,7 +311,10 @@ page = st.sidebar.radio(
     [
         "新增记录",
         "汇总统计",
+<<<<<<< HEAD
         "修改记录",
+=======
+>>>>>>> ea96d3306d47bcc36646269610add2639f8d14af
         "删除记录",
         "治疗师管理",
         "工资核对 / 打印",
@@ -436,6 +443,7 @@ elif page == "汇总统计":
             st.dataframe(raw_df[show_cols].sort_values("date", ascending=False), use_container_width=True)
 
 # =============================
+<<<<<<< HEAD
 # 修改记录
 # =============================
 elif page == "修改记录":
@@ -578,6 +586,8 @@ elif page == "修改记录":
                         st.rerun()
 
 # =============================
+=======
+>>>>>>> ea96d3306d47bcc36646269610add2639f8d14af
 # 删除记录
 # =============================
 elif page == "删除记录":

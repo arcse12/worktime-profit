@@ -344,30 +344,88 @@ df = refresh_data(worksheet)
 # -----------------------------
 st.header("新增每日收支记录")
 
+# 初始化默认值
+if "entry_date" not in st.session_state:
+    st.session_state["entry_date"] = date.today()
+if "entry_payment_type" not in st.session_state:
+    st.session_state["entry_payment_type"] = PAYMENT_OPTIONS[0]
+if "entry_client_name" not in st.session_state:
+    st.session_state["entry_client_name"] = ""
+if "entry_duration" not in st.session_state:
+    st.session_state["entry_duration"] = list(DURATION_RATE_MAP.keys())[0]
+if "entry_therapist_name" not in st.session_state:
+    st.session_state["entry_therapist_name"] = ""
+if "entry_total_revenue" not in st.session_state:
+    st.session_state["entry_total_revenue"] = 0.0
+if "entry_tip" not in st.session_state:
+    st.session_state["entry_tip"] = 0.0
+if "entry_therapist_income" not in st.session_state:
+    st.session_state["entry_therapist_income"] = float(DURATION_RATE_MAP[st.session_state["entry_duration"]])
+
+def entry_payment_or_duration_changed():
+    payment_type = st.session_state.get("entry_payment_type", PAYMENT_OPTIONS[0])
+    duration = st.session_state.get("entry_duration", list(DURATION_RATE_MAP.keys())[0])
+
+    if payment_type == "pc":
+        st.session_state["entry_therapist_income"] = 0.0
+    else:
+        st.session_state["entry_therapist_income"] = float(DURATION_RATE_MAP.get(duration, 0.0))
+
 c1, c2, c3 = st.columns(3)
 
 with c1:
     st.date_input("日期", key="entry_date")
-    st.selectbox("付款类型", PAYMENT_OPTIONS, key="entry_payment_type", on_change=sync_entry_income)
+    st.selectbox(
+        "付款类型",
+        PAYMENT_OPTIONS,
+        key="entry_payment_type",
+        on_change=entry_payment_or_duration_changed
+    )
 
 with c2:
     st.text_input("客人姓名 / Client Name", key="entry_client_name")
-    st.selectbox("治疗师工作时间", list(DURATION_RATE_MAP.keys()), key="entry_duration", on_change=sync_entry_income)
+    st.selectbox(
+        "治疗师工作时间",
+        list(DURATION_RATE_MAP.keys()),
+        key="entry_duration",
+        on_change=entry_payment_or_duration_changed
+    )
 
 with c3:
+    therapist_options = therapist_select_options(include_blank=True, blank_text="")
+    current_therapist = st.session_state.get("entry_therapist_name", "")
+    if current_therapist not in therapist_options:
+        current_therapist = ""
+        st.session_state["entry_therapist_name"] = ""
+
     st.selectbox(
         "治疗师姓名",
-        therapist_select_options(include_blank=True, blank_text=""),
+        therapist_options,
+        index=therapist_options.index(current_therapist),
         key="entry_therapist_name",
     )
-    st.number_input("总收入 ($)", min_value=0.0, step=1.0, format="%.2f", key="entry_total_revenue")
 
-st.number_input("小费 Tip ($)", min_value=0.0, step=1.0, format="%.2f", key="entry_tip")
+    st.number_input(
+        "总收入 ($)",
+        min_value=0.0,
+        step=1.0,
+        format="%.2f",
+        key="entry_total_revenue"
+    )
 
-if st.session_state["entry_payment_type"] == "pc":
-    st.session_state["entry_therapist_name"] = ""
-    st.session_state["entry_therapist_income"] = 0.0
+st.number_input(
+    "小费 Tip ($)",
+    min_value=0.0,
+    step=1.0,
+    format="%.2f",
+    key="entry_tip"
+)
+
+entry_payment_type = st.session_state["entry_payment_type"]
+
+if entry_payment_type == "pc":
     st.info("PC 类型不关联治疗师，治疗师收入自动为 0。")
+    display_therapist_income = 0.0
 else:
     st.number_input(
         "治疗师收入 ($)",
@@ -377,61 +435,82 @@ else:
         key="entry_therapist_income",
         help="默认按时长自动带出，也可手动修改。"
     )
+    display_therapist_income = float(st.session_state["entry_therapist_income"])
 
-entry_profit = float(st.session_state["entry_total_revenue"]) - float(st.session_state["entry_therapist_income"]) - float(st.session_state["entry_tip"])
+entry_profit = (
+    float(st.session_state["entry_total_revenue"])
+    - float(display_therapist_income)
+    - float(st.session_state["entry_tip"])
+)
+
 st.markdown(f"### 利润 Profit: **${entry_profit:.2f}**")
 
 if st.button("保存记录", key="save_entry_record"):
-    entry_payment_type = st.session_state["entry_payment_type"]
-    entry_therapist_name = str(st.session_state["entry_therapist_name"]).strip()
+    payment_type = st.session_state["entry_payment_type"]
 
-    if entry_payment_type != "pc" and not entry_therapist_name:
-        st.error("请选择治疗师姓名")
+    if payment_type == "pc":
+        therapist_name_to_save = ""
+        therapist_income_to_save = 0.0
     else:
-        row = {
-            "date": str(st.session_state["entry_date"]),
-            "payment_type": entry_payment_type,
-            "therapist_name": entry_therapist_name,
-            "client_name": str(st.session_state["entry_client_name"]).strip(),
-            "duration": st.session_state["entry_duration"],
-            "therapist_income": float(st.session_state["entry_therapist_income"]),
-            "tip": float(st.session_state["entry_tip"]),
-            "total_revenue": float(st.session_state["entry_total_revenue"]),
-            "profit": float(entry_profit),
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
+        therapist_name_to_save = str(st.session_state["entry_therapist_name"]).strip()
+        therapist_income_to_save = float(st.session_state["entry_therapist_income"])
 
-        row_list = [
-            row["date"],
-            row["payment_type"],
-            row["therapist_name"],
-            row["client_name"],
-            row["duration"],
-            row["therapist_income"],
-            row["tip"],
-            row["total_revenue"],
-            row["profit"],
-            row["created_at"],
-        ]
+        if not therapist_name_to_save:
+            st.error("请选择治疗师姓名")
+            st.stop()
 
-        try:
-            if worksheet is not None:
-                append_row_to_sheet(worksheet, row_list)
-                st.success("记录已保存到 Google Sheets。")
-            else:
-                st.session_state.local_data = pd.concat(
-                    [st.session_state.local_data, pd.DataFrame([row])],
-                    ignore_index=True
-                )
-                st.success("记录已保存到本地会话。")
+    row = {
+        "date": str(st.session_state["entry_date"]),
+        "payment_type": payment_type,
+        "therapist_name": therapist_name_to_save,
+        "client_name": str(st.session_state["entry_client_name"]).strip(),
+        "duration": st.session_state["entry_duration"],
+        "therapist_income": therapist_income_to_save,
+        "tip": float(st.session_state["entry_tip"]),
+        "total_revenue": float(st.session_state["entry_total_revenue"]),
+        "profit": float(
+            float(st.session_state["entry_total_revenue"])
+            - therapist_income_to_save
+            - float(st.session_state["entry_tip"])
+        ),
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
-            st.session_state["entry_client_name"] = ""
-            st.session_state["entry_total_revenue"] = 0.0
-            st.session_state["entry_tip"] = 0.0
-            sync_entry_income()
-            st.rerun()
-        except Exception as e:
-            st.error(f"保存失败：{e}")
+    row_list = [
+        row["date"],
+        row["payment_type"],
+        row["therapist_name"],
+        row["client_name"],
+        row["duration"],
+        row["therapist_income"],
+        row["tip"],
+        row["total_revenue"],
+        row["profit"],
+        row["created_at"],
+    ]
+
+    try:
+        if worksheet is not None:
+            append_row_to_sheet(worksheet, row_list)
+            st.success("记录已保存到 Google Sheets。")
+        else:
+            st.session_state.local_data = pd.concat(
+                [st.session_state.local_data, pd.DataFrame([row])],
+                ignore_index=True
+            )
+            st.success("记录已保存到本地会话。")
+
+        st.session_state["entry_client_name"] = ""
+        st.session_state["entry_total_revenue"] = 0.0
+        st.session_state["entry_tip"] = 0.0
+        if st.session_state["entry_payment_type"] != "pc":
+            st.session_state["entry_therapist_income"] = float(
+                DURATION_RATE_MAP.get(st.session_state["entry_duration"], 0.0)
+            )
+
+        st.rerun()
+    except Exception as e:
+        st.error(f"保存失败：{e}")
 
 df = refresh_data(worksheet)
 

@@ -500,14 +500,8 @@ if st.button("保存记录", key="save_entry_record"):
             )
             st.success("记录已保存到本地会话。")
 
-        st.session_state["entry_client_name"] = ""
-        st.session_state["entry_total_revenue"] = 0.0
-        st.session_state["entry_tip"] = 0.0
-        if st.session_state["entry_payment_type"] != "pc":
-            st.session_state["entry_therapist_income"] = float(
-                DURATION_RATE_MAP.get(st.session_state["entry_duration"], 0.0)
-            )
 
+        st.session_state["reset_entry_form"] = True
         st.rerun()
     except Exception as e:
         st.error(f"保存失败：{e}")

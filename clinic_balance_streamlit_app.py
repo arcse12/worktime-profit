@@ -578,21 +578,44 @@ else:
 
         with ec1:
             st.date_input("日期", key="edit_date_value")
-            payment_index = PAYMENT_OPTIONS.index(st.session_state["edit_payment_type_value"]) if st.session_state["edit_payment_type_value"] in PAYMENT_OPTIONS else 0
-            st.selectbox("付款类型", PAYMENT_OPTIONS, index=payment_index, key="edit_payment_type_value", on_change=sync_edit_income)
+
+            current_payment = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
+            payment_index = PAYMENT_OPTIONS.index(current_payment) if current_payment in PAYMENT_OPTIONS else 0
+            st.selectbox(
+                "付款类型",
+                PAYMENT_OPTIONS,
+                index=payment_index,
+                key="edit_payment_type_value",
+                on_change=sync_edit_income
+            )
 
         with ec2:
             st.text_input("客人姓名 / Client Name", key="edit_client_name_value")
+
             duration_options = list(DURATION_RATE_MAP.keys())
-            duration_index = duration_options.index(st.session_state["edit_duration_value"]) if st.session_state["edit_duration_value"] in duration_options else 0
-            st.selectbox("治疗师工作时间", duration_options, index=duration_index, key="edit_duration_value", on_change=sync_edit_income)
+            current_duration = st.session_state.get("edit_duration_value", duration_options[0])
+            duration_index = duration_options.index(current_duration) if current_duration in duration_options else 0
+            st.selectbox(
+                "治疗师工作时间",
+                duration_options,
+                index=duration_index,
+                key="edit_duration_value",
+                on_change=sync_edit_income
+            )
 
         with ec3:
+            therapist_options = therapist_select_options(include_blank=True, blank_text="")
+            current_edit_therapist = st.session_state.get("edit_therapist_name_value", "")
+            if current_edit_therapist not in therapist_options:
+                current_edit_therapist = ""
+
             st.selectbox(
                 "治疗师姓名",
-                therapist_select_options(include_blank=True, blank_text=""),
+                therapist_options,
+                index=therapist_options.index(current_edit_therapist),
                 key="edit_therapist_name_value"
             )
+
             st.number_input(
                 "总收入 ($)",
                 min_value=0.0,
@@ -609,72 +632,89 @@ else:
             key="edit_tip_value"
         )
 
-        if st.session_state["edit_payment_type_value"] == "pc":
-            st.session_state["edit_therapist_name_value"] = ""
-            st.session_state["edit_therapist_income_value"] = 0.0
+        edit_payment_type = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
+
+        if edit_payment_type == "pc":
             st.info("PC 类型不关联治疗师，治疗师收入自动为 0。")
+            display_edit_therapist_income = 0.0
         else:
             st.number_input(
                 "治疗师收入 ($)",
                 min_value=0.0,
                 step=1.0,
                 format="%.2f",
-                key="edit_therapist_income_value"
+                key="edit_therapist_income_value",
+                help="默认按时长自动带出，也可手动修改。"
             )
+            display_edit_therapist_income = float(st.session_state.get("edit_therapist_income_value", 0.0))
 
         edit_profit = (
-            float(st.session_state["edit_total_revenue_value"])
-            - float(st.session_state["edit_therapist_income_value"])
-            - float(st.session_state["edit_tip_value"])
+            float(st.session_state.get("edit_total_revenue_value", 0.0))
+            - float(display_edit_therapist_income)
+            - float(st.session_state.get("edit_tip_value", 0.0))
         )
         st.markdown(f"### 修改后利润 Profit: **${edit_profit:.2f}**")
 
         if st.button("保存修改", key="save_edit_record"):
-            if st.session_state["edit_payment_type_value"] != "pc" and not str(st.session_state["edit_therapist_name_value"]).strip():
-                st.error("请选择治疗师姓名")
+            edit_payment_type = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
+
+            if edit_payment_type == "pc":
+                therapist_name_to_save = ""
+                therapist_income_to_save = 0.0
             else:
-                updated_row = {
-                    "date": str(st.session_state["edit_date_value"]),
-                    "payment_type": st.session_state["edit_payment_type_value"],
-                    "therapist_name": str(st.session_state["edit_therapist_name_value"]).strip(),
-                    "client_name": str(st.session_state["edit_client_name_value"]).strip(),
-                    "duration": st.session_state["edit_duration_value"],
-                    "therapist_income": float(st.session_state["edit_therapist_income_value"]),
-                    "tip": float(st.session_state["edit_tip_value"]),
-                    "total_revenue": float(st.session_state["edit_total_revenue_value"]),
-                    "profit": float(edit_profit),
-                    "created_at": str(selected_row["created_at"]),
-                }
+                therapist_name_to_save = str(st.session_state.get("edit_therapist_name_value", "")).strip()
+                therapist_income_to_save = float(st.session_state.get("edit_therapist_income_value", 0.0))
 
-                updated_row_list = [
-                    updated_row["date"],
-                    updated_row["payment_type"],
-                    updated_row["therapist_name"],
-                    updated_row["client_name"],
-                    updated_row["duration"],
-                    updated_row["therapist_income"],
-                    updated_row["tip"],
-                    updated_row["total_revenue"],
-                    updated_row["profit"],
-                    updated_row["created_at"],
-                ]
+                if not therapist_name_to_save:
+                    st.error("请选择治疗师姓名")
+                    st.stop()
 
-                try:
-                    if worksheet is not None:
-                        sheet_row_number = int(selected_row["sheet_row_number"])
-                        update_row_in_sheet(worksheet, sheet_row_number, updated_row_list)
-                        st.success("Google Sheets 记录已修改。")
-                    else:
-                        local_row_id = int(selected_row["row_id"])
-                        st.session_state.local_data = save_local_update(
-                            st.session_state.local_data.copy(),
-                            local_row_id,
-                            updated_row
-                        )
-                        st.success("本地记录已修改。")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"修改失败：{e}")
+            updated_row = {
+                "date": str(st.session_state.get("edit_date_value", date.today())),
+                "payment_type": edit_payment_type,
+                "therapist_name": therapist_name_to_save,
+                "client_name": str(st.session_state.get("edit_client_name_value", "")).strip(),
+                "duration": st.session_state.get("edit_duration_value", list(DURATION_RATE_MAP.keys())[0]),
+                "therapist_income": therapist_income_to_save,
+                "tip": float(st.session_state.get("edit_tip_value", 0.0)),
+                "total_revenue": float(st.session_state.get("edit_total_revenue_value", 0.0)),
+                "profit": float(
+                    float(st.session_state.get("edit_total_revenue_value", 0.0))
+                    - therapist_income_to_save
+                    - float(st.session_state.get("edit_tip_value", 0.0))
+                ),
+                "created_at": str(selected_row["created_at"]),
+            }
+
+            updated_row_list = [
+                updated_row["date"],
+                updated_row["payment_type"],
+                updated_row["therapist_name"],
+                updated_row["client_name"],
+                updated_row["duration"],
+                updated_row["therapist_income"],
+                updated_row["tip"],
+                updated_row["total_revenue"],
+                updated_row["profit"],
+                updated_row["created_at"],
+            ]
+
+            try:
+                if worksheet is not None:
+                    sheet_row_number = int(selected_row["sheet_row_number"])
+                    update_row_in_sheet(worksheet, sheet_row_number, updated_row_list)
+                    st.success("Google Sheets 记录已修改。")
+                else:
+                    local_row_id = int(selected_row["row_id"])
+                    st.session_state.local_data = save_local_update(
+                        st.session_state.local_data.copy(),
+                        local_row_id,
+                        updated_row
+                    )
+                    st.success("本地记录已修改。")
+                st.rerun()
+            except Exception as e:
+                st.error(f"修改失败：{e}")
 
 # -----------------------------
 # 删除错误记录

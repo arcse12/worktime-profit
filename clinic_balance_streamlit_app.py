@@ -13,7 +13,7 @@ except Exception:
 st.set_page_config(page_title="Clinic Income & Expense Tracker", layout="wide")
 
 st.title("诊所每日收支平衡系统")
-st.caption("Streamlit + Google Sheets | 支持每日、每月、每年汇总 | 治疗师工资核对 | 支持修改与删除错误记录")
+st.caption("Streamlit + Google Sheets | 首次加载后本地缓存 | 新增/修改/删除先暂存，提交后才写入 Google Sheets")
 
 # -----------------------------
 # 基础配置
@@ -180,37 +180,74 @@ def delete_local_rows(df_local, row_ids):
     return df_local
 
 
-def refresh_data(worksheet):
-    if worksheet is not None:
-        df_local = load_data_from_sheet(worksheet)
-    else:
-        df_local = st.session_state.local_data.copy()
-
+# -----------------------------
+# 数据缓存 / 显示处理
+# -----------------------------
+def prepare_display_df(df_local, worksheet):
     if df_local.empty:
         df_local = pd.DataFrame(columns=BASE_COLUMNS)
     else:
         df_local = ensure_columns(df_local)
 
-    if not df_local.empty:
-        df_local["date"] = pd.to_datetime(df_local["date"], errors="coerce")
-        for col in ["therapist_income", "tip", "total_revenue", "profit"]:
-            df_local[col] = pd.to_numeric(df_local[col], errors="coerce").fillna(0.0)
+    if df_local.empty:
+        out = df_local.copy()
+        out["row_id"] = []
+        out["sheet_row_number"] = []
+        return out
 
-        df_local = df_local.reset_index(drop=True).copy()
-        df_local["row_id"] = df_local.index
-        if worksheet is not None:
-            df_local["sheet_row_number"] = df_local.index + 2
-        else:
-            df_local["sheet_row_number"] = None
+    df_local = df_local.copy()
+    df_local["date"] = pd.to_datetime(df_local["date"], errors="coerce")
+    for col in ["therapist_income", "tip", "total_revenue", "profit"]:
+        df_local[col] = pd.to_numeric(df_local[col], errors="coerce").fillna(0.0)
 
-        valid_df = df_local.dropna(subset=["date"]).copy()
-        if not valid_df.empty:
-            valid_df["day"] = valid_df["date"].dt.date.astype(str)
-            valid_df["month"] = valid_df["date"].dt.to_period("M").astype(str)
-            valid_df["year"] = valid_df["date"].dt.year.astype(str)
-        return valid_df
+    df_local = df_local.reset_index(drop=True).copy()
+    df_local["row_id"] = df_local.index
+    if worksheet is not None:
+        df_local["sheet_row_number"] = df_local.index + 2
+    else:
+        df_local["sheet_row_number"] = None
+
+    if "date" in df_local.columns:
+        df_local["day"] = df_local["date"].dt.date.astype(str)
+        df_local["month"] = df_local["date"].dt.to_period("M").astype(str)
+        df_local["year"] = df_local["date"].dt.year.astype("Int64").astype(str)
 
     return df_local
+
+
+def init_data_cache(worksheet):
+    if not st.session_state.data_loaded:
+        if worksheet is not None:
+            base_df = load_data_from_sheet(worksheet)
+        else:
+            base_df = st.session_state.local_data.copy()
+
+        base_df = ensure_columns(base_df)
+        st.session_state.server_data = base_df.copy()
+        st.session_state.working_data = base_df.copy()
+        st.session_state.data_loaded = True
+
+
+def refresh_from_server(worksheet):
+    if worksheet is not None:
+        fresh_df = load_data_from_sheet(worksheet)
+        fresh_df = ensure_columns(fresh_df)
+        st.session_state.server_data = fresh_df.copy()
+        st.session_state.working_data = fresh_df.copy()
+    else:
+        st.session_state.server_data = st.session_state.local_data.copy()
+        st.session_state.working_data = st.session_state.local_data.copy()
+
+    st.session_state.pending_changes = {
+        "new_rows": [],
+        "updated_rows": {},
+        "deleted_row_ids": set()
+    }
+    st.session_state.edit_loaded_uid = None
+
+
+def get_current_df(worksheet):
+    return prepare_display_df(st.session_state.working_data.copy(), worksheet)
 
 
 def get_record_uid(row):
@@ -219,6 +256,9 @@ def get_record_uid(row):
     return f"local_{int(row['row_id'])}"
 
 
+# -----------------------------
+# 表单联动
+# -----------------------------
 def sync_entry_income():
     payment_type = st.session_state.get("entry_payment_type", PAYMENT_OPTIONS[0])
     duration = st.session_state.get("entry_duration", list(DURATION_RATE_MAP.keys())[0])
@@ -269,6 +309,25 @@ if "therapists" not in st.session_state:
 if "local_data" not in st.session_state:
     st.session_state.local_data = pd.DataFrame(columns=BASE_COLUMNS)
 
+if "server_data" not in st.session_state:
+    st.session_state.server_data = pd.DataFrame(columns=BASE_COLUMNS)
+
+if "working_data" not in st.session_state:
+    st.session_state.working_data = pd.DataFrame(columns=BASE_COLUMNS)
+
+if "pending_changes" not in st.session_state:
+    st.session_state.pending_changes = {
+        "new_rows": [],
+        "updated_rows": {},
+        "deleted_row_ids": set()
+    }
+
+if "data_loaded" not in st.session_state:
+    st.session_state.data_loaded = False
+
+if "edit_loaded_uid" not in st.session_state:
+    st.session_state.edit_loaded_uid = None
+
 if "entry_date" not in st.session_state:
     st.session_state["entry_date"] = date.today()
 if "entry_payment_type" not in st.session_state:
@@ -285,6 +344,9 @@ if "entry_tip" not in st.session_state:
     st.session_state["entry_tip"] = 0.0
 if "entry_therapist_income" not in st.session_state:
     st.session_state["entry_therapist_income"] = float(DURATION_RATE_MAP[st.session_state["entry_duration"]])
+
+init_data_cache(worksheet)
+df = get_current_df(worksheet)
 
 # -----------------------------
 # 侧边栏
@@ -334,42 +396,98 @@ with st.sidebar:
     for i, t in enumerate(st.session_state.therapists, start=1):
         st.write(f"{i}. {t}")
 
-# -----------------------------
-# 数据载入
-# -----------------------------
-df = refresh_data(worksheet)
+    st.markdown("---")
+    st.subheader("待提交更改")
+
+    pending_new = len(st.session_state.pending_changes["new_rows"])
+    pending_update = len(st.session_state.pending_changes["updated_rows"])
+    pending_delete = len(st.session_state.pending_changes["deleted_row_ids"])
+
+    st.write(f"待新增：{pending_new} 条")
+    st.write(f"待修改：{pending_update} 条")
+    st.write(f"待删除：{pending_delete} 条")
+
+    if st.button("放弃临时修改"):
+        st.session_state.working_data = st.session_state.server_data.copy()
+        st.session_state.pending_changes = {
+            "new_rows": [],
+            "updated_rows": {},
+            "deleted_row_ids": set()
+        }
+        st.session_state.edit_loaded_uid = None
+        st.success("已恢复为上次正式数据。")
+        st.rerun()
+
+    if st.button("提交更改到 Google Sheets", type="primary"):
+        try:
+            if worksheet is not None:
+                # 先处理删除
+                delete_ids = sorted(st.session_state.pending_changes["deleted_row_ids"], reverse=True)
+                for rid in delete_ids:
+                    sheet_row_number = rid + 2
+                    delete_rows_from_sheet(worksheet, [sheet_row_number])
+
+                # 再处理修改
+                update_ids = sorted(st.session_state.pending_changes["updated_rows"].keys())
+                deleted_before = sorted(st.session_state.pending_changes["deleted_row_ids"])
+
+                for rid in update_ids:
+                    if rid in st.session_state.pending_changes["deleted_row_ids"]:
+                        continue
+
+                    adjusted_row_number = rid + 2
+                    shift = sum(1 for d in deleted_before if d < rid)
+                    adjusted_row_number -= shift
+
+                    updated_row = st.session_state.pending_changes["updated_rows"][rid]
+                    updated_row_list = [
+                        updated_row["date"],
+                        updated_row["payment_type"],
+                        updated_row["therapist_name"],
+                        updated_row["client_name"],
+                        updated_row["duration"],
+                        updated_row["therapist_income"],
+                        updated_row["tip"],
+                        updated_row["total_revenue"],
+                        updated_row["profit"],
+                        updated_row["created_at"],
+                    ]
+                    update_row_in_sheet(worksheet, adjusted_row_number, updated_row_list)
+
+                # 最后处理新增
+                for row in st.session_state.pending_changes["new_rows"]:
+                    row_list = [
+                        row["date"],
+                        row["payment_type"],
+                        row["therapist_name"],
+                        row["client_name"],
+                        row["duration"],
+                        row["therapist_income"],
+                        row["tip"],
+                        row["total_revenue"],
+                        row["profit"],
+                        row["created_at"],
+                    ]
+                    append_row_to_sheet(worksheet, row_list)
+
+                refresh_from_server(worksheet)
+                st.success("所有更改已提交到 Google Sheets。")
+                st.rerun()
+
+            else:
+                # 本地模式：提交就把 working_data 变成正式数据
+                st.session_state.local_data = st.session_state.working_data.copy()
+                refresh_from_server(worksheet)
+                st.success("当前为本地模式，临时更改已正式保存到本地会话。")
+                st.rerun()
+
+        except Exception as e:
+            st.error(f"提交失败：{e}")
 
 # -----------------------------
-# 新增记录（立即刷新版）
+# 新增记录
 # -----------------------------
 st.header("新增每日收支记录")
-
-# 初始化默认值
-if "entry_date" not in st.session_state:
-    st.session_state["entry_date"] = date.today()
-if "entry_payment_type" not in st.session_state:
-    st.session_state["entry_payment_type"] = PAYMENT_OPTIONS[0]
-if "entry_client_name" not in st.session_state:
-    st.session_state["entry_client_name"] = ""
-if "entry_duration" not in st.session_state:
-    st.session_state["entry_duration"] = list(DURATION_RATE_MAP.keys())[0]
-if "entry_therapist_name" not in st.session_state:
-    st.session_state["entry_therapist_name"] = ""
-if "entry_total_revenue" not in st.session_state:
-    st.session_state["entry_total_revenue"] = 0.0
-if "entry_tip" not in st.session_state:
-    st.session_state["entry_tip"] = 0.0
-if "entry_therapist_income" not in st.session_state:
-    st.session_state["entry_therapist_income"] = float(DURATION_RATE_MAP[st.session_state["entry_duration"]])
-
-def entry_payment_or_duration_changed():
-    payment_type = st.session_state.get("entry_payment_type", PAYMENT_OPTIONS[0])
-    duration = st.session_state.get("entry_duration", list(DURATION_RATE_MAP.keys())[0])
-
-    if payment_type == "pc":
-        st.session_state["entry_therapist_income"] = 0.0
-    else:
-        st.session_state["entry_therapist_income"] = float(DURATION_RATE_MAP.get(duration, 0.0))
 
 c1, c2, c3 = st.columns(3)
 
@@ -379,7 +497,7 @@ with c1:
         "付款类型",
         PAYMENT_OPTIONS,
         key="entry_payment_type",
-        on_change=entry_payment_or_duration_changed
+        on_change=sync_entry_income
     )
 
 with c2:
@@ -388,7 +506,7 @@ with c2:
         "治疗师工作时间",
         list(DURATION_RATE_MAP.keys()),
         key="entry_duration",
-        on_change=entry_payment_or_duration_changed
+        on_change=sync_entry_income
     )
 
 with c3:
@@ -445,7 +563,7 @@ entry_profit = (
 
 st.markdown(f"### 利润 Profit: **${entry_profit:.2f}**")
 
-if st.button("保存记录", key="save_entry_record"):
+if st.button("保存到临时缓存", key="save_entry_record"):
     payment_type = st.session_state["entry_payment_type"]
 
     if payment_type == "pc":
@@ -476,37 +594,17 @@ if st.button("保存记录", key="save_entry_record"):
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-    row_list = [
-        row["date"],
-        row["payment_type"],
-        row["therapist_name"],
-        row["client_name"],
-        row["duration"],
-        row["therapist_income"],
-        row["tip"],
-        row["total_revenue"],
-        row["profit"],
-        row["created_at"],
-    ]
+    st.session_state.working_data = pd.concat(
+        [st.session_state.working_data, pd.DataFrame([row])],
+        ignore_index=True
+    )
 
-    try:
-        if worksheet is not None:
-            append_row_to_sheet(worksheet, row_list)
-            st.success("记录已保存到 Google Sheets。")
-        else:
-            st.session_state.local_data = pd.concat(
-                [st.session_state.local_data, pd.DataFrame([row])],
-                ignore_index=True
-            )
-            st.success("记录已保存到本地会话。")
+    st.session_state.pending_changes["new_rows"].append(row)
 
+    st.success("记录已加入临时缓存，点击左侧“提交更改到 Google Sheets”后才会正式写入。")
+    st.rerun()
 
-        st.session_state["reset_entry_form"] = True
-        st.rerun()
-    except Exception as e:
-        st.error(f"保存失败：{e}")
-
-df = refresh_data(worksheet)
+df = get_current_df(worksheet)
 
 # -----------------------------
 # 修改错误记录
@@ -649,7 +747,7 @@ else:
         )
         st.markdown(f"### 修改后利润 Profit: **${edit_profit:.2f}**")
 
-        if st.button("保存修改", key="save_edit_record"):
+        if st.button("保存修改到临时缓存", key="save_edit_record"):
             edit_payment_type = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
 
             if edit_payment_type == "pc":
@@ -680,40 +778,29 @@ else:
                 "created_at": str(selected_row["created_at"]),
             }
 
-            updated_row_list = [
-                updated_row["date"],
-                updated_row["payment_type"],
-                updated_row["therapist_name"],
-                updated_row["client_name"],
-                updated_row["duration"],
-                updated_row["therapist_income"],
-                updated_row["tip"],
-                updated_row["total_revenue"],
-                updated_row["profit"],
-                updated_row["created_at"],
-            ]
+            row_id = int(selected_row["row_id"])
 
-            try:
-                if worksheet is not None:
-                    sheet_row_number = int(selected_row["sheet_row_number"])
-                    update_row_in_sheet(worksheet, sheet_row_number, updated_row_list)
-                    st.success("Google Sheets 记录已修改。")
-                else:
-                    local_row_id = int(selected_row["row_id"])
-                    st.session_state.local_data = save_local_update(
-                        st.session_state.local_data.copy(),
-                        local_row_id,
-                        updated_row
-                    )
-                    st.success("本地记录已修改。")
-                st.rerun()
-            except Exception as e:
-                st.error(f"修改失败：{e}")
+            st.session_state.working_data = save_local_update(
+                st.session_state.working_data.copy(),
+                row_id,
+                updated_row
+            )
+
+            if row_id in st.session_state.pending_changes["deleted_row_ids"]:
+                st.error("该记录已被标记删除，不能再修改。")
+                st.stop()
+
+            st.session_state.pending_changes["updated_rows"][row_id] = updated_row
+
+            st.success("修改已保存到临时缓存，点击左侧“提交更改到 Google Sheets”后才会正式写入。")
+            st.rerun()
 
 # -----------------------------
 # 删除错误记录
 # -----------------------------
 st.header("删除错误记录")
+
+df = get_current_df(worksheet)
 
 if df.empty:
     st.info("目前没有可删除的数据。")
@@ -782,32 +869,32 @@ else:
         selected_rows = edited_delete_df[edited_delete_df["选择删除"] == True].copy()
 
         if not selected_rows.empty:
-            st.warning(f"已勾选 {len(selected_rows)} 条记录，删除后无法恢复。")
+            st.warning(f"已勾选 {len(selected_rows)} 条记录，点击下面按钮后仅加入临时删除清单。")
 
-        if st.button("删除勾选记录", type="primary"):
+        if st.button("加入临时删除清单", type="primary"):
             if selected_rows.empty:
                 st.error("请先勾选要删除的记录。")
             else:
-                try:
-                    if worksheet is not None:
-                        row_numbers = selected_rows["sheet_row_number"].dropna().astype(int).tolist()
-                        delete_rows_from_sheet(worksheet, row_numbers)
-                        st.success(f"已删除 {len(row_numbers)} 条 Google Sheets 记录。")
-                    else:
-                        row_ids = selected_rows["row_id"].astype(int).tolist()
-                        st.session_state.local_data = delete_local_rows(
-                            st.session_state.local_data.copy(),
-                            row_ids
-                        )
-                        st.success(f"已删除 {len(row_ids)} 条本地记录。")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"删除失败：{e}")
+                row_ids = selected_rows["row_id"].astype(int).tolist()
+
+                st.session_state.working_data = delete_local_rows(
+                    st.session_state.working_data.copy(),
+                    row_ids
+                )
+
+                for rid in row_ids:
+                    st.session_state.pending_changes["deleted_row_ids"].add(rid)
+                    if rid in st.session_state.pending_changes["updated_rows"]:
+                        del st.session_state.pending_changes["updated_rows"][rid]
+
+                st.success(f"已将 {len(row_ids)} 条记录加入临时删除清单，提交后才会真正删除。")
+                st.rerun()
 
 # -----------------------------
 # 汇总显示
 # -----------------------------
 st.header("收支汇总")
+df = get_current_df(worksheet)
 
 if df.empty:
     st.info("目前还没有数据。")
@@ -848,6 +935,7 @@ else:
 # 查询功能
 # -----------------------------
 st.header("查询与工资核对")
+df = get_current_df(worksheet)
 
 if df.empty:
     st.info("请先录入数据后再查询。")
@@ -1033,6 +1121,7 @@ else:
 # 原始记录
 # -----------------------------
 st.header("原始记录")
+df = get_current_df(worksheet)
 
 if not df.empty:
     raw_col1, raw_col2, raw_col3 = st.columns(3)

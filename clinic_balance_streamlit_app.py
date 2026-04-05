@@ -14,7 +14,7 @@ except Exception:
 st.set_page_config(page_title="Clinic Income & Expense Tracker", layout="wide")
 
 st.title("诊所每日收支平衡系统")
-st.caption("Streamlit + Google Sheets | 新增先暂存，修改/删除立即覆盖 Google Sheets | 日期按 Calgary 时区")
+st.caption("Streamlit + Google Sheets | 新增/修改/删除都先缓存，提交时只按最终结果写入 | 日期按 Calgary 时区")
 
 # -----------------------------
 # 基础配置
@@ -180,27 +180,41 @@ def delete_rows_from_sheet(worksheet, row_numbers):
         worksheet.delete_rows(int(row_num))
 
 
+def clean_text_cell(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+
+def clean_numeric_cell(value) -> float:
+    numeric_value = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric_value):
+        return 0.0
+    return float(numeric_value)
+
+
+
 def overwrite_sheet_with_df(worksheet, df_local):
     df_to_save = ensure_columns(df_local.copy())
-    df_to_save = df_to_save.fillna("")
 
     rows = [BASE_COLUMNS]
     for _, row in df_to_save.iterrows():
         rows.append([
-            str(row["date"]),
-            str(row["payment_type"]),
-            str(row["therapist_name"]),
-            str(row["client_name"]),
-            str(row["duration"]),
-            float(pd.to_numeric(row["therapist_income"], errors="coerce") or 0.0),
-            float(pd.to_numeric(row["tip"], errors="coerce") or 0.0),
-            float(pd.to_numeric(row["total_revenue"], errors="coerce") or 0.0),
-            float(pd.to_numeric(row["profit"], errors="coerce") or 0.0),
-            str(row["created_at"]),
+            clean_text_cell(row["date"]),
+            clean_text_cell(row["payment_type"]),
+            clean_text_cell(row["therapist_name"]),
+            clean_text_cell(row["client_name"]),
+            clean_text_cell(row["duration"]),
+            clean_numeric_cell(row["therapist_income"]),
+            clean_numeric_cell(row["tip"]),
+            clean_numeric_cell(row["total_revenue"]),
+            clean_numeric_cell(row["profit"]),
+            clean_text_cell(row["created_at"]),
         ])
 
     worksheet.clear()
-    worksheet.update("A1:J{}".format(len(rows)), rows, value_input_option="USER_ENTERED")
+    worksheet.update(f"A1:J{len(rows)}", rows, value_input_option="USER_ENTERED")
 
 
 def save_local_update(df_local, row_index, row_dict):
@@ -434,10 +448,12 @@ with st.sidebar:
     st.subheader("待提交更改")
 
     pending_new = len(st.session_state.pending_changes["new_rows"])
+    pending_update = len(st.session_state.pending_changes["updated_rows"])
+    pending_delete = len(st.session_state.pending_changes["deleted_row_ids"])
 
     st.write(f"待新增：{pending_new} 条")
-    st.write("修改：即时覆盖，不进缓存")
-    st.write("删除：即时删除，不进缓存")
+    st.write(f"待修改：{pending_update} 条")
+    st.write(f"待删除：{pending_delete} 条")
 
     if st.button("放弃临时修改"):
         st.session_state.working_data = st.session_state.server_data.copy()
@@ -450,15 +466,15 @@ with st.sidebar:
         st.success("已恢复为上次正式数据。")
         st.rerun()
 
-    if st.button("提交新增到 Google Sheets", type="primary"):
+    if st.button("提交所有缓存到 Google Sheets", type="primary"):
         try:
             if worksheet is not None:
-                # 为避免“删除 + 修改 + 新增”同时发生时行号错位，
-                # 统一以当前 working_data 为准，整表重写到 Google Sheets。
+                # 提交时只以当前 working_data 的最终状态为准，
+                # 不分别按新增/修改/删除逐条操作，避免缓存互相冲突。
                 overwrite_sheet_with_df(worksheet, st.session_state.working_data)
 
                 refresh_from_server(worksheet)
-                st.success("所有更改已提交到 Google Sheets。")
+                st.success("所有缓存更改已提交到 Google Sheets。")
                 st.rerun()
 
             else:
@@ -588,7 +604,7 @@ if st.button("保存到临时缓存", key="save_entry_record"):
 
     st.session_state.pending_changes["new_rows"].append(row)
 
-    st.success("记录已加入临时缓存，点击左侧“提交新增到 Google Sheets”后才会正式写入。")
+    st.success("记录已加入临时缓存，点击左侧“提交所有缓存到 Google Sheets”后才会正式写入。")
     st.rerun()
 
 df = get_current_df(worksheet)
@@ -734,7 +750,7 @@ else:
         )
         st.markdown(f"### 修改后利润 Profit: **${edit_profit:.2f}**")
 
-        if st.button("直接覆盖当前记录", key="save_edit_record"):
+        if st.button("保存修改到缓存", key="save_edit_record"):
             edit_payment_type = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
 
             if edit_payment_type == "pc":
@@ -776,21 +792,10 @@ else:
             if row_id in st.session_state.pending_changes["deleted_row_ids"]:
                 st.session_state.pending_changes["deleted_row_ids"].discard(row_id)
 
-            if row_id in st.session_state.pending_changes["updated_rows"]:
-                del st.session_state.pending_changes["updated_rows"][row_id]
+            st.session_state.pending_changes["updated_rows"][row_id] = updated_row
 
-            try:
-                if worksheet is not None:
-                    overwrite_sheet_with_df(worksheet, st.session_state.working_data)
-                    refresh_from_server(worksheet)
-                    st.success("修改已直接覆盖到 Google Sheets。")
-                else:
-                    st.session_state.local_data = st.session_state.working_data.copy()
-                    refresh_from_server(worksheet)
-                    st.success("当前为本地模式，修改已直接保存。")
-                st.rerun()
-            except Exception as e:
-                st.error(f"修改失败：{e}")
+            st.success("修改已保存到缓存，提交时只会以上次最终修改结果写入。")
+            st.rerun()
 
 # -----------------------------
 # 删除错误记录
@@ -866,9 +871,9 @@ else:
         selected_rows = edited_delete_df[edited_delete_df["选择删除"] == True].copy()
 
         if not selected_rows.empty:
-            st.warning(f"已勾选 {len(selected_rows)} 条记录，点击下面按钮后会直接删除。")
+            st.warning(f"已勾选 {len(selected_rows)} 条记录，点击下面按钮后会加入删除缓存。")
 
-        if st.button("直接删除选中记录", type="primary"):
+        if st.button("加入删除缓存", type="primary"):
             if selected_rows.empty:
                 st.error("请先勾选要删除的记录。")
             else:
@@ -880,22 +885,12 @@ else:
                 )
 
                 for rid in row_ids:
-                    st.session_state.pending_changes["deleted_row_ids"].discard(rid)
+                    st.session_state.pending_changes["deleted_row_ids"].add(rid)
                     if rid in st.session_state.pending_changes["updated_rows"]:
                         del st.session_state.pending_changes["updated_rows"][rid]
 
-                try:
-                    if worksheet is not None:
-                        overwrite_sheet_with_df(worksheet, st.session_state.working_data)
-                        refresh_from_server(worksheet)
-                        st.success(f"已直接删除 {len(row_ids)} 条记录。")
-                    else:
-                        st.session_state.local_data = st.session_state.working_data.copy()
-                        refresh_from_server(worksheet)
-                        st.success(f"当前为本地模式，已直接删除 {len(row_ids)} 条记录。")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"删除失败：{e}")
+                st.success(f"已将 {len(row_ids)} 条记录加入删除缓存，提交时只会按最终结果删除。")
+                st.rerun()
 
 # -----------------------------
 # 汇总显示

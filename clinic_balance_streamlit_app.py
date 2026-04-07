@@ -22,6 +22,7 @@ st.caption("Streamlit + Google Sheets | 新增/修改/删除都先缓存，提�
 PAYMENT_OPTIONS = ["pc", "pfp", "pbm", "pbi", "pbc"]
 DURATION_RATE_MAP = {
     "30 min": 32.5,
+    "45 min": 48.75,
     "60 min": 65.0,
     "75 min": 81.25,
     "90 min": 97.5,

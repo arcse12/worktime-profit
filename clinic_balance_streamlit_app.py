@@ -11,10 +11,47 @@ except Exception:
     gspread = None
     Credentials = None
 
-st.set_page_config(page_title="Clinic Income & Expense Tracker", layout="wide")
+st.set_page_config(page_title="诊所收支与工资核对", layout="wide")
 
-st.title("诊所每日收支平衡系统")
-st.caption("Streamlit + Google Sheets | 新增/修改/删除都先缓存，提交时只按最终结果写入 | 日期按 Calgary 时区")
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1.6rem;
+        padding-bottom: 3rem;
+        max-width: 1380px;
+    }
+    div[data-testid="stMetric"] {
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 14px 16px;
+        background: #ffffff;
+    }
+    div[data-testid="stMetric"] label {
+        color: #475569;
+    }
+    .status-strip {
+        border: 1px solid #dbe3ef;
+        border-radius: 8px;
+        padding: 12px 14px;
+        background: #f8fafc;
+        margin: 0.5rem 0 1rem;
+    }
+    .profit-positive {
+        color: #047857;
+        font-weight: 700;
+    }
+    .profit-negative {
+        color: #b91c1c;
+        font-weight: 700;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("诊所收支与工资核对")
+st.caption("新增、修改、删除都会先进入缓存；确认无误后再统一提交到 Google Sheets。日期按 Calgary 时区。")
 
 # -----------------------------
 # 基础配置
@@ -305,6 +342,75 @@ def get_record_uid(row):
     return f"local_{int(row['row_id'])}"
 
 
+def money(value) -> str:
+    return f"${float(value):,.2f}"
+
+
+def pending_counts():
+    changes = st.session_state.pending_changes
+    return (
+        len(changes["new_rows"]),
+        len(changes["updated_rows"]),
+        len(changes["deleted_row_ids"]),
+    )
+
+
+def summarize_money(df_local):
+    if df_local.empty:
+        return {
+            "count": 0,
+            "total_revenue": 0.0,
+            "therapist_income": 0.0,
+            "tip": 0.0,
+            "profit": 0.0,
+        }
+
+    return {
+        "count": int(len(df_local)),
+        "total_revenue": float(df_local["total_revenue"].sum()),
+        "therapist_income": float(df_local["therapist_income"].sum()),
+        "tip": float(df_local["tip"].sum()),
+        "profit": float(df_local["profit"].sum()),
+    }
+
+
+def render_money_metrics(summary, count_label="记录数"):
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric(count_label, f"{summary['count']}")
+    c2.metric("总收入", money(summary["total_revenue"]))
+    c3.metric("治疗师工资", money(summary["therapist_income"]))
+    c4.metric("小费", money(summary["tip"]))
+    c5.metric("利润", money(summary["profit"]))
+
+
+def format_display_table(df_local, columns):
+    if df_local.empty:
+        return df_local
+
+    rename_map = {
+        "date": "日期",
+        "day": "日期",
+        "month": "月份",
+        "year": "年份",
+        "payment_type": "付款方式",
+        "therapist_name": "治疗师",
+        "client_name": "客人",
+        "duration": "时长",
+        "therapist_income": "治疗师工资",
+        "tip": "小费",
+        "total_revenue": "总收入",
+        "profit": "利润",
+        "created_at": "创建时间",
+        "client_count": "客人数",
+    }
+    return df_local[columns].rename(columns=rename_map)
+
+
+def render_profit_text(label, value):
+    css_class = "profit-positive" if value >= 0 else "profit-negative"
+    st.markdown(f"### {label}: <span class='{css_class}'>{money(value)}</span>", unsafe_allow_html=True)
+
+
 # -----------------------------
 # 表单联动
 # -----------------------------
@@ -398,19 +504,73 @@ init_data_cache(worksheet)
 df = get_current_df(worksheet)
 
 # -----------------------------
-# 侧边栏
+# 全局状态与侧边栏
 # -----------------------------
+df = get_current_df(worksheet)
+pending_new, pending_update, pending_delete = pending_counts()
+pending_total = pending_new + pending_update + pending_delete
+
+status_text = "Google Sheets 已连接" if worksheet is not None else "本地会话模式"
+status_class = "success" if worksheet is not None else "warning"
+st.markdown(
+    f"""
+    <div class="status-strip">
+        <strong>{status_text}</strong>　{gs_message}<br>
+        待提交：新增 {pending_new} 条，修改 {pending_update} 条，删除 {pending_delete} 条。
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+today_key = str(calgary_today())
+month_key = calgary_today().strftime("%Y-%m")
+today_df = df[df["day"] == today_key].copy() if not df.empty and "day" in df.columns else pd.DataFrame(columns=df.columns)
+month_df = df[df["month"] == month_key].copy() if not df.empty and "month" in df.columns else pd.DataFrame(columns=df.columns)
+
+st.caption(f"今日概览 {today_key}")
+render_money_metrics(summarize_money(today_df), count_label="今日记录")
+st.caption(f"本月概览 {month_key}")
+render_money_metrics(summarize_money(month_df), count_label="本月记录")
+
 with st.sidebar:
-    st.subheader("系统状态")
-    if worksheet is not None:
-        st.success(gs_message)
+    st.subheader("提交控制")
+    if pending_total:
+        st.warning(f"还有 {pending_total} 条缓存更改未提交。")
     else:
-        st.warning(gs_message)
+        st.success("当前没有待提交更改。")
 
-    st.subheader("治疗师名单管理")
-    new_therapist = st.text_input("新增治疗师")
+    submit_label = "提交缓存到 Google Sheets" if worksheet is not None else "保存到本地会话"
+    if st.button(submit_label, type="primary", use_container_width=True, disabled=pending_total == 0):
+        try:
+            if worksheet is not None:
+                overwrite_sheet_with_df(worksheet, st.session_state.working_data)
+                refresh_from_server(worksheet)
+                st.success("所有缓存更改已提交到 Google Sheets。")
+                st.rerun()
+            else:
+                st.session_state.local_data = st.session_state.working_data.copy()
+                refresh_from_server(worksheet)
+                st.success("临时更改已正式保存到本地会话。")
+                st.rerun()
+        except Exception as e:
+            st.error(f"提交失败：{e}")
 
-    if st.button("添加治疗师"):
+    if st.button("放弃缓存更改", use_container_width=True, disabled=pending_total == 0):
+        st.session_state.working_data = st.session_state.server_data.copy()
+        st.session_state.pending_changes = {
+            "new_rows": [],
+            "updated_rows": {},
+            "deleted_row_ids": set()
+        }
+        st.session_state.edit_loaded_uid = None
+        st.success("已恢复为上次正式数据。")
+        st.rerun()
+
+    st.markdown("---")
+    st.subheader("治疗师管理")
+    new_therapist = st.text_input("新增治疗师", placeholder="输入姓名")
+
+    if st.button("添加治疗师", use_container_width=True):
         name = new_therapist.strip()
         if name:
             if name not in st.session_state.therapists:
@@ -427,738 +587,512 @@ with st.sidebar:
         else:
             st.error("请输入治疗师姓名")
 
-    if st.session_state.therapists:
-        therapist_to_remove = st.selectbox("删除治疗师", [""] + st.session_state.therapists)
-        if st.button("删除选中的治疗师"):
-            if therapist_to_remove:
-                st.session_state.therapists.remove(therapist_to_remove)
-                if spreadsheet is not None:
-                    try:
-                        save_therapists_to_sheet(spreadsheet, st.session_state.therapists)
-                    except Exception as e:
-                        st.error(f"已更新本地名单，但保存到 Google Sheets 失败：{e}")
-                st.success(f"已删除治疗师：{therapist_to_remove}")
-                st.rerun()
-
-    st.markdown("---")
-    st.write("当前治疗师名单：")
-    for i, t in enumerate(st.session_state.therapists, start=1):
-        st.write(f"{i}. {t}")
-
-    st.markdown("---")
-    st.subheader("待提交更改")
-
-    pending_new = len(st.session_state.pending_changes["new_rows"])
-    pending_update = len(st.session_state.pending_changes["updated_rows"])
-    pending_delete = len(st.session_state.pending_changes["deleted_row_ids"])
-
-    st.write(f"待新增：{pending_new} 条")
-    st.write(f"待修改：{pending_update} 条")
-    st.write(f"待删除：{pending_delete} 条")
-
-    if st.button("放弃临时修改"):
-        st.session_state.working_data = st.session_state.server_data.copy()
-        st.session_state.pending_changes = {
-            "new_rows": [],
-            "updated_rows": {},
-            "deleted_row_ids": set()
-        }
-        st.session_state.edit_loaded_uid = None
-        st.success("已恢复为上次正式数据。")
-        st.rerun()
-
-    if st.button("提交所有缓存到 Google Sheets", type="primary"):
-        try:
-            if worksheet is not None:
-                # 提交时只以当前 working_data 的最终状态为准，
-                # 不分别按新增/修改/删除逐条操作，避免缓存互相冲突。
-                overwrite_sheet_with_df(worksheet, st.session_state.working_data)
-
-                refresh_from_server(worksheet)
-                st.success("所有缓存更改已提交到 Google Sheets。")
-                st.rerun()
-
-            else:
-                # 本地模式：提交就把 working_data 变成正式数据
-                st.session_state.local_data = st.session_state.working_data.copy()
-                refresh_from_server(worksheet)
-                st.success("当前为本地模式，临时更改已正式保存到本地会话。")
-                st.rerun()
-
-        except Exception as e:
-            st.error(f"提交失败：{e}")
-
-# -----------------------------
-# 新增记录
-# -----------------------------
-st.header("新增每日收支记录")
-
-c1, c2, c3 = st.columns(3)
-
-with c1:
-    st.date_input("日期", key="entry_date")
-    st.selectbox(
-        "付款类型",
-        PAYMENT_OPTIONS,
-        key="entry_payment_type",
-        on_change=sync_entry_income
-    )
-
-with c2:
-    st.text_input("客人姓名 / Client Name", key="entry_client_name")
-    st.selectbox(
-        "治疗师工作时间",
-        list(DURATION_RATE_MAP.keys()),
-        key="entry_duration",
-        on_change=sync_entry_income
-    )
-
-with c3:
-    therapist_options = therapist_select_options(include_blank=True, blank_text="")
-    current_therapist = st.session_state.get("entry_therapist_name", "")
-    if current_therapist not in therapist_options:
-        current_therapist = ""
-        st.session_state["entry_therapist_name"] = ""
-
-    st.selectbox(
-        "治疗师姓名",
-        therapist_options,
-        index=therapist_options.index(current_therapist),
-        key="entry_therapist_name",
-    )
-
-    st.number_input(
-        "总收入 ($)",
-        min_value=0.0,
-        step=1.0,
-        format="%.2f",
-        key="entry_total_revenue"
-    )
-
-st.number_input(
-    "小费 Tip ($)",
-    min_value=0.0,
-    step=1.0,
-    format="%.2f",
-    key="entry_tip"
-)
-
-entry_payment_type = st.session_state["entry_payment_type"]
-
-if entry_payment_type == "pc":
-    st.info("PC 类型不关联治疗师，治疗师收入自动为 0。")
-    display_therapist_income = 0.0
-else:
-    st.number_input(
-        "治疗师收入 ($)",
-        min_value=0.0,
-        step=1.0,
-        format="%.2f",
-        key="entry_therapist_income",
-        help="默认按时长自动带出，也可手动修改。"
-    )
-    display_therapist_income = float(st.session_state["entry_therapist_income"])
-
-entry_profit = (
-    float(st.session_state["entry_total_revenue"])
-    - float(display_therapist_income)
-    - float(st.session_state["entry_tip"])
-)
-
-st.markdown(f"### 利润 Profit: **${entry_profit:.2f}**")
-
-if st.button("保存到临时缓存", key="save_entry_record"):
-    payment_type = st.session_state["entry_payment_type"]
-
-    if payment_type == "pc":
-        therapist_name_to_save = ""
-        therapist_income_to_save = 0.0
-    else:
-        therapist_name_to_save = str(st.session_state["entry_therapist_name"]).strip()
-        therapist_income_to_save = float(st.session_state["entry_therapist_income"])
-
-        if not therapist_name_to_save:
-            st.error("请选择治疗师姓名")
-            st.stop()
-
-    row = {
-        "date": str(st.session_state["entry_date"]),
-        "payment_type": payment_type,
-        "therapist_name": therapist_name_to_save,
-        "client_name": str(st.session_state["entry_client_name"]).strip(),
-        "duration": st.session_state["entry_duration"],
-        "therapist_income": therapist_income_to_save,
-        "tip": float(st.session_state["entry_tip"]),
-        "total_revenue": float(st.session_state["entry_total_revenue"]),
-        "profit": float(
-            float(st.session_state["entry_total_revenue"])
-            - therapist_income_to_save
-            - float(st.session_state["entry_tip"])
-        ),
-        "created_at": calgary_now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
-    st.session_state.working_data = pd.concat(
-        [st.session_state.working_data, pd.DataFrame([row])],
-        ignore_index=True
-    )
-
-    st.session_state.pending_changes["new_rows"].append(row)
-
-    st.success("记录已加入临时缓存，点击左侧“提交所有缓存到 Google Sheets”后才会正式写入。")
-    st.rerun()
-
-df = get_current_df(worksheet)
-
-# -----------------------------
-# 修改错误记录
-# -----------------------------
-st.header("修改错误记录")
-
-if df.empty:
-    st.info("目前没有可修改的数据。")
-else:
-    edit_filter_col1, edit_filter_col2, edit_filter_col3, edit_filter_col4 = st.columns(4)
-
-    with edit_filter_col1:
-        edit_date_options = ["全部"] + sorted(df["day"].dropna().unique().tolist(), reverse=True) if "day" in df.columns else ["全部"]
-        selected_edit_date = st.selectbox("按日期筛选", edit_date_options, key="edit_date_filter")
-
-    with edit_filter_col2:
-        therapist_values = sorted([x for x in df["therapist_name"].dropna().astype(str).unique().tolist() if x.strip()])
-        edit_therapist_options = ["全部"] + therapist_values
-        selected_edit_therapist = st.selectbox("按治疗师筛选", edit_therapist_options, key="edit_therapist_filter")
-
-    with edit_filter_col3:
-        client_keyword = st.text_input("按客人姓名搜索", key="edit_client_keyword")
-
-    with edit_filter_col4:
-        edit_payment_options = ["全部"] + PAYMENT_OPTIONS
-        selected_edit_payment = st.selectbox("按付款方式筛选", edit_payment_options, key="edit_payment_filter")
-
-    edit_df = df.copy()
-
-    if selected_edit_date != "全部" and "day" in edit_df.columns:
-        edit_df = edit_df[edit_df["day"] == selected_edit_date]
-
-    if selected_edit_therapist != "全部":
-        edit_df = edit_df[edit_df["therapist_name"] == selected_edit_therapist]
-
-    if selected_edit_payment != "全部":
-        edit_df = edit_df[edit_df["payment_type"] == selected_edit_payment]
-
-    if client_keyword.strip():
-        edit_df = edit_df[
-            edit_df["client_name"].astype(str).str.contains(client_keyword.strip(), case=False, na=False)
-        ]
-
-    if edit_df.empty:
-        st.warning("没有找到符合条件的记录。")
-    else:
-        edit_df = edit_df.sort_values(["date", "client_name"], ascending=[False, True]).copy()
-        edit_df["record_label"] = edit_df.apply(
-            lambda r: f"{r['day']} | {r['client_name']} | {r['payment_type']} | {r['therapist_name']} | ${r['total_revenue']:.2f}",
-            axis=1
-        )
-
-        selected_label = st.selectbox(
-            "请选择要修改的记录",
-            edit_df["record_label"].tolist(),
-            key="record_to_edit"
-        )
-
-        selected_row = edit_df[edit_df["record_label"] == selected_label].iloc[0]
-        load_selected_record_to_editor(selected_row)
-
-        ec1, ec2, ec3 = st.columns(3)
-
-        with ec1:
-            st.date_input("日期", key="edit_date_value")
-
-            current_payment = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
-            payment_index = PAYMENT_OPTIONS.index(current_payment) if current_payment in PAYMENT_OPTIONS else 0
-            st.selectbox(
-                "付款类型",
-                PAYMENT_OPTIONS,
-                index=payment_index,
-                key="edit_payment_type_value",
-                on_change=sync_edit_income
-            )
-
-        with ec2:
-            st.text_input("客人姓名 / Client Name", key="edit_client_name_value")
-
-            duration_options = list(DURATION_RATE_MAP.keys())
-            current_duration = st.session_state.get("edit_duration_value", duration_options[0])
-            duration_index = duration_options.index(current_duration) if current_duration in duration_options else 0
-            st.selectbox(
-                "治疗师工作时间",
-                duration_options,
-                index=duration_index,
-                key="edit_duration_value",
-                on_change=sync_edit_income
-            )
-
-        with ec3:
-            therapist_options = therapist_select_options(include_blank=True, blank_text="")
-            current_edit_therapist = st.session_state.get("edit_therapist_name_value", "")
-            if current_edit_therapist not in therapist_options:
-                current_edit_therapist = ""
-
-            st.selectbox(
-                "治疗师姓名",
-                therapist_options,
-                index=therapist_options.index(current_edit_therapist),
-                key="edit_therapist_name_value"
-            )
-
-            st.number_input(
-                "总收入 ($)",
-                min_value=0.0,
-                step=1.0,
-                format="%.2f",
-                key="edit_total_revenue_value"
-            )
-
-        st.number_input(
-            "小费 Tip ($)",
-            min_value=0.0,
-            step=1.0,
-            format="%.2f",
-            key="edit_tip_value"
-        )
-
-        edit_payment_type = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
-
-        if edit_payment_type == "pc":
-            st.info("PC 类型不关联治疗师，治疗师收入自动为 0。")
-            display_edit_therapist_income = 0.0
+    therapist_to_remove = st.selectbox("删除治疗师", [""] + st.session_state.therapists)
+    if st.button("删除选中治疗师", use_container_width=True):
+        if therapist_to_remove:
+            st.session_state.therapists.remove(therapist_to_remove)
+            if spreadsheet is not None:
+                try:
+                    save_therapists_to_sheet(spreadsheet, st.session_state.therapists)
+                except Exception as e:
+                    st.error(f"已更新本地名单，但保存到 Google Sheets 失败：{e}")
+            st.success(f"已删除治疗师：{therapist_to_remove}")
+            st.rerun()
         else:
-            st.number_input(
-                "治疗师收入 ($)",
-                min_value=0.0,
-                step=1.0,
-                format="%.2f",
-                key="edit_therapist_income_value",
-                help="默认按时长自动带出，也可手动修改。"
+            st.error("请先选择治疗师")
+
+    st.caption("当前名单")
+    st.write("、".join(st.session_state.therapists) if st.session_state.therapists else "暂无")
+
+entry_tab, manage_tab, summary_tab, payroll_tab, raw_tab = st.tabs([
+    "录入",
+    "修改 / 删除",
+    "汇总",
+    "工资核对",
+    "原始记录",
+])
+
+with entry_tab:
+    st.subheader("新增每日收支记录")
+    left, right = st.columns([2, 1])
+
+    with left:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.date_input("日期", key="entry_date")
+            st.selectbox("付款方式", PAYMENT_OPTIONS, key="entry_payment_type", on_change=sync_entry_income)
+        with c2:
+            st.text_input("客人姓名", key="entry_client_name")
+            st.selectbox("治疗时长", list(DURATION_RATE_MAP.keys()), key="entry_duration", on_change=sync_entry_income)
+        with c3:
+            therapist_options = therapist_select_options(include_blank=True, blank_text="")
+            current_therapist = st.session_state.get("entry_therapist_name", "")
+            if current_therapist not in therapist_options:
+                current_therapist = ""
+                st.session_state["entry_therapist_name"] = ""
+
+            st.selectbox(
+                "治疗师",
+                therapist_options,
+                index=therapist_options.index(current_therapist),
+                key="entry_therapist_name",
             )
-            display_edit_therapist_income = float(st.session_state.get("edit_therapist_income_value", 0.0))
+            st.number_input("总收入 ($)", min_value=0.0, step=1.0, format="%.2f", key="entry_total_revenue")
 
-        edit_profit = (
-            float(st.session_state.get("edit_total_revenue_value", 0.0))
-            - float(display_edit_therapist_income)
-            - float(st.session_state.get("edit_tip_value", 0.0))
+        fee_col, income_col = st.columns(2)
+        with fee_col:
+            st.number_input("小费 ($)", min_value=0.0, step=1.0, format="%.2f", key="entry_tip")
+
+        entry_payment_type = st.session_state["entry_payment_type"]
+        if entry_payment_type == "pc":
+            display_therapist_income = 0.0
+            with income_col:
+                st.info("PC 类型不关联治疗师，治疗师工资为 0。")
+        else:
+            with income_col:
+                st.number_input(
+                    "治疗师工资 ($)",
+                    min_value=0.0,
+                    step=1.0,
+                    format="%.2f",
+                    key="entry_therapist_income",
+                    help="默认按治疗时长自动带出，也可以手动调整。",
+                )
+            display_therapist_income = float(st.session_state["entry_therapist_income"])
+
+    with right:
+        entry_profit = (
+            float(st.session_state["entry_total_revenue"])
+            - float(display_therapist_income)
+            - float(st.session_state["entry_tip"])
         )
-        st.markdown(f"### 修改后利润 Profit: **${edit_profit:.2f}**")
+        render_profit_text("本单利润", entry_profit)
+        st.write(f"总收入：{money(st.session_state['entry_total_revenue'])}")
+        st.write(f"治疗师工资：{money(display_therapist_income)}")
+        st.write(f"小费：{money(st.session_state['entry_tip'])}")
 
-        if st.button("保存修改到缓存", key="save_edit_record"):
-            edit_payment_type = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
+        if st.button("加入缓存", key="save_entry_record", type="primary", use_container_width=True):
+            payment_type = st.session_state["entry_payment_type"]
 
-            if edit_payment_type == "pc":
+            if payment_type == "pc":
                 therapist_name_to_save = ""
                 therapist_income_to_save = 0.0
             else:
-                therapist_name_to_save = str(st.session_state.get("edit_therapist_name_value", "")).strip()
-                therapist_income_to_save = float(st.session_state.get("edit_therapist_income_value", 0.0))
+                therapist_name_to_save = str(st.session_state["entry_therapist_name"]).strip()
+                therapist_income_to_save = float(st.session_state["entry_therapist_income"])
 
                 if not therapist_name_to_save:
                     st.error("请选择治疗师姓名")
                     st.stop()
 
-            updated_row = {
-                "date": str(st.session_state.get("edit_date_value", calgary_today())),
-                "payment_type": edit_payment_type,
+            row = {
+                "date": str(st.session_state["entry_date"]),
+                "payment_type": payment_type,
                 "therapist_name": therapist_name_to_save,
-                "client_name": str(st.session_state.get("edit_client_name_value", "")).strip(),
-                "duration": st.session_state.get("edit_duration_value", list(DURATION_RATE_MAP.keys())[0]),
+                "client_name": str(st.session_state["entry_client_name"]).strip(),
+                "duration": st.session_state["entry_duration"],
                 "therapist_income": therapist_income_to_save,
-                "tip": float(st.session_state.get("edit_tip_value", 0.0)),
-                "total_revenue": float(st.session_state.get("edit_total_revenue_value", 0.0)),
-                "profit": float(
-                    float(st.session_state.get("edit_total_revenue_value", 0.0))
-                    - therapist_income_to_save
-                    - float(st.session_state.get("edit_tip_value", 0.0))
-                ),
-                "created_at": str(selected_row["created_at"]),
+                "tip": float(st.session_state["entry_tip"]),
+                "total_revenue": float(st.session_state["entry_total_revenue"]),
+                "profit": float(entry_profit),
+                "created_at": calgary_now().strftime("%Y-%m-%d %H:%M:%S"),
             }
 
-            row_id = int(selected_row["row_id"])
-
-            st.session_state.working_data = save_local_update(
-                st.session_state.working_data.copy(),
-                row_id,
-                updated_row
+            st.session_state.working_data = pd.concat(
+                [st.session_state.working_data, pd.DataFrame([row])],
+                ignore_index=True,
             )
-
-            if row_id in st.session_state.pending_changes["deleted_row_ids"]:
-                st.session_state.pending_changes["deleted_row_ids"].discard(row_id)
-
-            st.session_state.pending_changes["updated_rows"][row_id] = updated_row
-
-            st.success("修改已保存到缓存，提交时只会以上次最终修改结果写入。")
+            st.session_state.pending_changes["new_rows"].append(row)
+            st.success("已加入缓存。确认无误后，在左侧提交。")
             st.rerun()
 
-# -----------------------------
-# 删除错误记录
-# -----------------------------
-st.header("删除错误记录")
+    df = get_current_df(worksheet)
+    if not today_df.empty:
+        st.markdown("#### 今日记录")
+        show_cols = ["day", "payment_type", "therapist_name", "client_name", "duration", "therapist_income", "tip", "total_revenue", "profit"]
+        st.dataframe(format_display_table(today_df.sort_values("date", ascending=False), show_cols), use_container_width=True)
 
-df = get_current_df(worksheet)
+with manage_tab:
+    st.subheader("修改或删除记录")
+    df = get_current_df(worksheet)
 
-if df.empty:
-    st.info("目前没有可删除的数据。")
-else:
-    del_col1, del_col2, del_col3, del_col4 = st.columns(4)
-
-    with del_col1:
-        delete_date_options = ["全部"] + sorted(df["day"].dropna().unique().tolist(), reverse=True)
-        selected_delete_date = st.selectbox("按日期筛选删除", delete_date_options, key="delete_date_filter")
-
-    with del_col2:
-        delete_therapist_values = sorted([x for x in df["therapist_name"].dropna().astype(str).unique().tolist() if x.strip()])
-        delete_therapist_options = ["全部"] + delete_therapist_values
-        selected_delete_therapist = st.selectbox("按治疗师筛选删除", delete_therapist_options, key="delete_therapist_filter")
-
-    with del_col3:
-        delete_client_keyword = st.text_input("按客人姓名搜索删除", key="delete_client_keyword")
-
-    with del_col4:
-        delete_payment_options = ["全部"] + PAYMENT_OPTIONS
-        selected_delete_payment = st.selectbox("按付款方式筛选删除", delete_payment_options, key="delete_payment_filter")
-
-    delete_df = df.copy()
-
-    if selected_delete_date != "全部":
-        delete_df = delete_df[delete_df["day"] == selected_delete_date]
-
-    if selected_delete_therapist != "全部":
-        delete_df = delete_df[delete_df["therapist_name"] == selected_delete_therapist]
-
-    if selected_delete_payment != "全部":
-        delete_df = delete_df[delete_df["payment_type"] == selected_delete_payment]
-
-    if delete_client_keyword.strip():
-        delete_df = delete_df[
-            delete_df["client_name"].astype(str).str.contains(delete_client_keyword.strip(), case=False, na=False)
-        ]
-
-    if delete_df.empty:
-        st.warning("没有找到可删除的记录。")
+    if df.empty:
+        st.info("目前没有可修改或删除的数据。")
     else:
-        delete_df = delete_df.sort_values(["date", "client_name"], ascending=[False, True]).copy()
-        delete_df["选择删除"] = False
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+        with filter_col1:
+            date_options = ["全部"] + sorted(df["day"].dropna().unique().tolist(), reverse=True)
+            selected_manage_date = st.selectbox("日期", date_options, key="manage_date_filter")
+        with filter_col2:
+            therapist_values = sorted([x for x in df["therapist_name"].dropna().astype(str).unique().tolist() if x.strip()])
+            selected_manage_therapist = st.selectbox("治疗师", ["全部"] + therapist_values, key="manage_therapist_filter")
+        with filter_col3:
+            selected_manage_payment = st.selectbox("付款方式", ["全部"] + PAYMENT_OPTIONS, key="manage_payment_filter")
+        with filter_col4:
+            manage_client_keyword = st.text_input("客人姓名", key="manage_client_keyword")
 
-        delete_show_cols = [
-            "选择删除", "day", "payment_type", "therapist_name", "client_name",
-            "duration", "therapist_income", "tip", "total_revenue", "profit"
-        ]
+        manage_df = df.copy()
+        if selected_manage_date != "全部":
+            manage_df = manage_df[manage_df["day"] == selected_manage_date]
+        if selected_manage_therapist != "全部":
+            manage_df = manage_df[manage_df["therapist_name"] == selected_manage_therapist]
+        if selected_manage_payment != "全部":
+            manage_df = manage_df[manage_df["payment_type"] == selected_manage_payment]
+        if manage_client_keyword.strip():
+            manage_df = manage_df[manage_df["client_name"].astype(str).str.contains(manage_client_keyword.strip(), case=False, na=False)]
 
-        edited_delete_df = st.data_editor(
-            delete_df[delete_show_cols + ["row_id", "sheet_row_number"]].copy(),
-            hide_index=True,
-            use_container_width=True,
-            disabled=[
-                "day", "payment_type", "therapist_name", "client_name",
-                "duration", "therapist_income", "tip", "total_revenue", "profit",
-                "row_id", "sheet_row_number"
-            ],
-            column_config={
-                "row_id": None,
-                "sheet_row_number": None,
-            },
-            key="delete_data_editor"
-        )
+        edit_area, delete_area = st.tabs(["修改单条记录", "批量删除"])
 
-        selected_rows = edited_delete_df[edited_delete_df["选择删除"] == True].copy()
-
-        if not selected_rows.empty:
-            st.warning(f"已勾选 {len(selected_rows)} 条记录，点击下面按钮后会加入删除缓存。")
-
-        if st.button("加入删除缓存", type="primary"):
-            if selected_rows.empty:
-                st.error("请先勾选要删除的记录。")
+        with edit_area:
+            if manage_df.empty:
+                st.warning("没有找到符合条件的记录。")
             else:
-                row_ids = selected_rows["row_id"].astype(int).tolist()
-
-                st.session_state.working_data = delete_local_rows(
-                    st.session_state.working_data.copy(),
-                    row_ids
+                edit_df = manage_df.sort_values(["date", "client_name"], ascending=[False, True]).copy()
+                edit_df["record_label"] = edit_df.apply(
+                    lambda r: f"{r['day']} | {r['client_name']} | {r['payment_type']} | {r['therapist_name'] or '无治疗师'} | {money(r['total_revenue'])}",
+                    axis=1,
                 )
 
-                for rid in row_ids:
-                    st.session_state.pending_changes["deleted_row_ids"].add(rid)
-                    if rid in st.session_state.pending_changes["updated_rows"]:
-                        del st.session_state.pending_changes["updated_rows"][rid]
+                selected_label = st.selectbox("选择要修改的记录", edit_df["record_label"].tolist(), key="record_to_edit")
+                selected_row = edit_df[edit_df["record_label"] == selected_label].iloc[0]
+                load_selected_record_to_editor(selected_row)
 
-                st.success(f"已将 {len(row_ids)} 条记录加入删除缓存，提交时只会按最终结果删除。")
-                st.rerun()
+                ec1, ec2, ec3 = st.columns(3)
+                with ec1:
+                    st.date_input("日期", key="edit_date_value")
+                    current_payment = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
+                    payment_index = PAYMENT_OPTIONS.index(current_payment) if current_payment in PAYMENT_OPTIONS else 0
+                    st.selectbox("付款方式", PAYMENT_OPTIONS, index=payment_index, key="edit_payment_type_value", on_change=sync_edit_income)
+                with ec2:
+                    st.text_input("客人姓名", key="edit_client_name_value")
+                    duration_options = list(DURATION_RATE_MAP.keys())
+                    current_duration = st.session_state.get("edit_duration_value", duration_options[0])
+                    duration_index = duration_options.index(current_duration) if current_duration in duration_options else 0
+                    st.selectbox("治疗时长", duration_options, index=duration_index, key="edit_duration_value", on_change=sync_edit_income)
+                with ec3:
+                    therapist_options = therapist_select_options(include_blank=True, blank_text="")
+                    current_edit_therapist = st.session_state.get("edit_therapist_name_value", "")
+                    if current_edit_therapist not in therapist_options:
+                        current_edit_therapist = ""
+                    st.selectbox("治疗师", therapist_options, index=therapist_options.index(current_edit_therapist), key="edit_therapist_name_value")
+                    st.number_input("总收入 ($)", min_value=0.0, step=1.0, format="%.2f", key="edit_total_revenue_value")
 
-# -----------------------------
-# 汇总显示
-# -----------------------------
-st.header("收支汇总")
-df = get_current_df(worksheet)
+                fee_col, income_col = st.columns(2)
+                with fee_col:
+                    st.number_input("小费 ($)", min_value=0.0, step=1.0, format="%.2f", key="edit_tip_value")
 
-if df.empty:
-    st.info("目前还没有数据。")
-else:
-    daily_summary = df.groupby("day", as_index=False).agg(
-        total_revenue=("total_revenue", "sum"),
-        therapist_income=("therapist_income", "sum"),
-        tip=("tip", "sum"),
-        profit=("profit", "sum"),
-    ).sort_values("day", ascending=False)
+                edit_payment_type = st.session_state.get("edit_payment_type_value", PAYMENT_OPTIONS[0])
+                if edit_payment_type == "pc":
+                    display_edit_therapist_income = 0.0
+                    with income_col:
+                        st.info("PC 类型不关联治疗师，治疗师工资为 0。")
+                else:
+                    with income_col:
+                        st.number_input(
+                            "治疗师工资 ($)",
+                            min_value=0.0,
+                            step=1.0,
+                            format="%.2f",
+                            key="edit_therapist_income_value",
+                            help="默认按治疗时长自动带出，也可以手动调整。",
+                        )
+                    display_edit_therapist_income = float(st.session_state.get("edit_therapist_income_value", 0.0))
 
-    monthly_summary = df.groupby("month", as_index=False).agg(
-        total_revenue=("total_revenue", "sum"),
-        therapist_income=("therapist_income", "sum"),
-        tip=("tip", "sum"),
-        profit=("profit", "sum"),
-    ).sort_values("month", ascending=False)
+                edit_profit = (
+                    float(st.session_state.get("edit_total_revenue_value", 0.0))
+                    - float(display_edit_therapist_income)
+                    - float(st.session_state.get("edit_tip_value", 0.0))
+                )
+                render_profit_text("修改后利润", edit_profit)
 
-    yearly_summary = df.groupby("year", as_index=False).agg(
-        total_revenue=("total_revenue", "sum"),
-        therapist_income=("therapist_income", "sum"),
-        tip=("tip", "sum"),
-        profit=("profit", "sum"),
-    ).sort_values("year", ascending=False)
+                if st.button("保存修改到缓存", key="save_edit_record", type="primary"):
+                    if edit_payment_type == "pc":
+                        therapist_name_to_save = ""
+                        therapist_income_to_save = 0.0
+                    else:
+                        therapist_name_to_save = str(st.session_state.get("edit_therapist_name_value", "")).strip()
+                        therapist_income_to_save = float(st.session_state.get("edit_therapist_income_value", 0.0))
+                        if not therapist_name_to_save:
+                            st.error("请选择治疗师姓名")
+                            st.stop()
 
-    tab1, tab2, tab3 = st.tabs(["每日收支", "每月收支", "每年总收支"])
+                    updated_row = {
+                        "date": str(st.session_state.get("edit_date_value", calgary_today())),
+                        "payment_type": edit_payment_type,
+                        "therapist_name": therapist_name_to_save,
+                        "client_name": str(st.session_state.get("edit_client_name_value", "")).strip(),
+                        "duration": st.session_state.get("edit_duration_value", list(DURATION_RATE_MAP.keys())[0]),
+                        "therapist_income": therapist_income_to_save,
+                        "tip": float(st.session_state.get("edit_tip_value", 0.0)),
+                        "total_revenue": float(st.session_state.get("edit_total_revenue_value", 0.0)),
+                        "profit": float(edit_profit),
+                        "created_at": str(selected_row["created_at"]),
+                    }
 
-    with tab1:
-        st.dataframe(daily_summary, use_container_width=True)
+                    row_id = int(selected_row["row_id"])
+                    st.session_state.working_data = save_local_update(st.session_state.working_data.copy(), row_id, updated_row)
+                    st.session_state.pending_changes["deleted_row_ids"].discard(row_id)
+                    st.session_state.pending_changes["updated_rows"][row_id] = updated_row
+                    st.success("修改已保存到缓存。提交时会写入最终版本。")
+                    st.rerun()
 
-    with tab2:
-        st.dataframe(monthly_summary, use_container_width=True)
-
-    with tab3:
-        st.dataframe(yearly_summary, use_container_width=True)
-
-# -----------------------------
-# 查询功能
-# -----------------------------
-st.header("查询与工资核对")
-df = get_current_df(worksheet)
-
-if df.empty:
-    st.info("请先录入数据后再查询。")
-else:
-    query_tab1, query_tab2, query_tab3 = st.tabs([
-        "治疗师月工资查询",
-        "治疗师客人名单 / 打印",
-        "利润查询"
-    ])
-
-    with query_tab1:
-        st.subheader("查询该治疗师这个月工资总共多少")
-        therapists_for_query = therapist_select_options(include_blank=False)
-        months_for_query = sorted(df["month"].dropna().unique().tolist(), reverse=True)
-
-        if therapists_for_query and months_for_query:
-            selected_therapist = st.selectbox("选择治疗师", therapists_for_query, key="salary_therapist")
-            selected_month = st.selectbox("选择月份", months_for_query, key="salary_month")
-
-            therapist_month_df = df[
-                (df["therapist_name"] == selected_therapist) &
-                (df["month"] == selected_month)
-            ].copy().sort_values("date")
-
-            total_salary = therapist_month_df["therapist_income"].sum()
-            total_tip = therapist_month_df["tip"].sum()
-            total_count = len(therapist_month_df)
-            total_revenue = therapist_month_df["total_revenue"].sum()
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("治疗次数", total_count)
-            c2.metric("治疗师工资", f"${total_salary:,.2f}")
-            c3.metric("小费合计", f"${total_tip:,.2f}")
-            c4.metric("相关总收入", f"${total_revenue:,.2f}")
-
-            detail_cols = [
-                "day", "client_name", "payment_type", "duration",
-                "therapist_income", "tip", "total_revenue"
-            ]
-            st.dataframe(therapist_month_df[detail_cols], use_container_width=True)
-        else:
-            st.warning("暂无可供查询的治疗师数据。")
-
-    with query_tab2:
-        st.subheader("打印该月每天该治疗师的客人名单与收入")
-        therapists_for_print = therapist_select_options(include_blank=False)
-        months_for_print = sorted(df["month"].dropna().unique().tolist(), reverse=True)
-
-        if therapists_for_print and months_for_print:
-            print_therapist = st.selectbox("选择治疗师用于打印", therapists_for_print, key="print_therapist")
-            print_month = st.selectbox("选择月份用于打印", months_for_print, key="print_month")
-
-            print_df = df[
-                (df["therapist_name"] == print_therapist) &
-                (df["month"] == print_month)
-            ].copy().sort_values(["date", "client_name"])
-
-            if print_df.empty:
-                st.warning("该治疗师在该月份没有记录。")
+        with delete_area:
+            if manage_df.empty:
+                st.warning("没有找到可删除的记录。")
             else:
-                grouped = print_df.groupby("day", as_index=False).agg(
-                    client_count=("client_name", "count"),
+                delete_df = manage_df.sort_values(["date", "client_name"], ascending=[False, True]).copy()
+                delete_df["选择删除"] = False
+                delete_show_cols = [
+                    "选择删除", "day", "payment_type", "therapist_name", "client_name",
+                    "duration", "therapist_income", "tip", "total_revenue", "profit"
+                ]
+
+                edited_delete_df = st.data_editor(
+                    delete_df[delete_show_cols + ["row_id", "sheet_row_number"]].copy(),
+                    hide_index=True,
+                    use_container_width=True,
+                    disabled=[
+                        "day", "payment_type", "therapist_name", "client_name",
+                        "duration", "therapist_income", "tip", "total_revenue", "profit",
+                        "row_id", "sheet_row_number",
+                    ],
+                    column_config={"row_id": None, "sheet_row_number": None},
+                    key="delete_data_editor",
+                )
+
+                selected_rows = edited_delete_df[edited_delete_df["选择删除"] == True].copy()
+                if not selected_rows.empty:
+                    st.warning(f"已勾选 {len(selected_rows)} 条记录。加入缓存后，左侧提交才会正式删除。")
+
+                if st.button("加入删除缓存", type="primary"):
+                    if selected_rows.empty:
+                        st.error("请先勾选要删除的记录。")
+                    else:
+                        row_ids = selected_rows["row_id"].astype(int).tolist()
+                        st.session_state.working_data = delete_local_rows(st.session_state.working_data.copy(), row_ids)
+                        for rid in row_ids:
+                            st.session_state.pending_changes["deleted_row_ids"].add(rid)
+                            st.session_state.pending_changes["updated_rows"].pop(rid, None)
+                        st.success(f"已将 {len(row_ids)} 条记录加入删除缓存。")
+                        st.rerun()
+
+with summary_tab:
+    st.subheader("收支汇总")
+    df = get_current_df(worksheet)
+
+    if df.empty:
+        st.info("目前还没有数据。")
+    else:
+        daily_summary = df.groupby("day", as_index=False).agg(
+            total_revenue=("total_revenue", "sum"),
+            therapist_income=("therapist_income", "sum"),
+            tip=("tip", "sum"),
+            profit=("profit", "sum"),
+        ).sort_values("day", ascending=False)
+
+        monthly_summary = df.groupby("month", as_index=False).agg(
+            total_revenue=("total_revenue", "sum"),
+            therapist_income=("therapist_income", "sum"),
+            tip=("tip", "sum"),
+            profit=("profit", "sum"),
+        ).sort_values("month", ascending=False)
+
+        yearly_summary = df.groupby("year", as_index=False).agg(
+            total_revenue=("total_revenue", "sum"),
+            therapist_income=("therapist_income", "sum"),
+            tip=("tip", "sum"),
+            profit=("profit", "sum"),
+        ).sort_values("year", ascending=False)
+
+        st.markdown("#### 当前数据总览")
+        render_money_metrics(summarize_money(df), count_label="总记录")
+
+        tab1, tab2, tab3 = st.tabs(["每日", "每月", "每年"])
+        summary_cols = ["day", "total_revenue", "therapist_income", "tip", "profit"]
+        with tab1:
+            st.dataframe(format_display_table(daily_summary, summary_cols), use_container_width=True)
+        with tab2:
+            st.dataframe(format_display_table(monthly_summary, ["month", "total_revenue", "therapist_income", "tip", "profit"]), use_container_width=True)
+        with tab3:
+            st.dataframe(format_display_table(yearly_summary, ["year", "total_revenue", "therapist_income", "tip", "profit"]), use_container_width=True)
+
+with payroll_tab:
+    st.subheader("工资核对与利润查询")
+    df = get_current_df(worksheet)
+
+    if df.empty:
+        st.info("请先录入数据后再查询。")
+    else:
+        query_tab1, query_tab2, query_tab3 = st.tabs(["治疗师月工资", "工资单下载", "利润查询"])
+
+        with query_tab1:
+            therapists_for_query = therapist_select_options(include_blank=False)
+            months_for_query = sorted(df["month"].dropna().unique().tolist(), reverse=True)
+
+            if therapists_for_query and months_for_query:
+                qc1, qc2 = st.columns(2)
+                with qc1:
+                    selected_therapist = st.selectbox("治疗师", therapists_for_query, key="salary_therapist")
+                with qc2:
+                    selected_month = st.selectbox("月份", months_for_query, key="salary_month")
+
+                therapist_month_df = df[
+                    (df["therapist_name"] == selected_therapist) &
+                    (df["month"] == selected_month)
+                ].copy().sort_values("date")
+
+                render_money_metrics(summarize_money(therapist_month_df), count_label="治疗次数")
+                detail_cols = ["day", "client_name", "payment_type", "duration", "therapist_income", "tip", "total_revenue"]
+                st.dataframe(format_display_table(therapist_month_df, detail_cols), use_container_width=True)
+            else:
+                st.warning("暂无可供查询的治疗师数据。")
+
+        with query_tab2:
+            therapists_for_print = therapist_select_options(include_blank=False)
+            months_for_print = sorted(df["month"].dropna().unique().tolist(), reverse=True)
+
+            if therapists_for_print and months_for_print:
+                pc1, pc2 = st.columns(2)
+                with pc1:
+                    print_therapist = st.selectbox("治疗师", therapists_for_print, key="print_therapist")
+                with pc2:
+                    print_month = st.selectbox("月份", months_for_print, key="print_month")
+
+                print_df = df[
+                    (df["therapist_name"] == print_therapist) &
+                    (df["month"] == print_month)
+                ].copy().sort_values(["date", "client_name"])
+
+                if print_df.empty:
+                    st.warning("该治疗师在该月份没有记录。")
+                else:
+                    grouped = print_df.groupby("day", as_index=False).agg(
+                        client_count=("client_name", "count"),
+                        therapist_income=("therapist_income", "sum"),
+                        tip=("tip", "sum"),
+                        total_revenue=("total_revenue", "sum"),
+                    )
+
+                    st.markdown(f"#### {print_therapist} - {print_month} 工资核对单")
+                    render_money_metrics(summarize_money(print_df), count_label="客人数")
+
+                    st.markdown("##### 每日汇总")
+                    st.dataframe(format_display_table(grouped, ["day", "client_count", "therapist_income", "tip", "total_revenue"]), use_container_width=True)
+
+                    st.markdown("##### 客人明细")
+                    display_cols = ["day", "client_name", "payment_type", "duration", "therapist_income", "tip", "total_revenue"]
+                    st.dataframe(format_display_table(print_df, display_cols), use_container_width=True)
+
+                    summary_df = pd.DataFrame([
+                        ["月份", print_month],
+                        ["治疗师", print_therapist],
+                        ["本月总收入 Total Revenue", float(print_df["total_revenue"].sum())],
+                        ["本月治疗师收入 Therapist Income", float(print_df["therapist_income"].sum())],
+                        ["本月小费 Tip", float(print_df["tip"].sum())],
+                        ["本月客人数 Client Count", int(len(print_df))],
+                    ], columns=["项目", "数值"])
+
+                    detail_df = print_df[display_cols].copy()
+                    csv_text = summary_df.to_csv(index=False) + "\n" + detail_df.to_csv(index=False)
+
+                    dl1, dl2 = st.columns(2)
+                    with dl1:
+                        st.download_button(
+                            label="下载 CSV 明细",
+                            data=csv_text.encode("utf-8-sig"),
+                            file_name=f"{print_therapist}_{print_month}_payroll_detail.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+
+                    printable_html = f"""
+                    <html>
+                    <head>
+                        <meta charset='utf-8'>
+                        <style>
+                            body {{ font-family: Arial, sans-serif; padding: 20px; }}
+                            h1, h2, h3 {{ margin-bottom: 8px; }}
+                            table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
+                            th, td {{ border: 1px solid #999; padding: 6px; text-align: left; font-size: 12px; }}
+                        </style>
+                    </head>
+                    <body>
+                        <h1>{print_therapist} - {print_month} 工资核对单</h1>
+                        <p>月总收入 Total Revenue: {money(print_df["total_revenue"].sum())}</p>
+                        <p>月工资合计 Therapist Income: {money(print_df["therapist_income"].sum())}</p>
+                        <p>月小费合计 Tip: {money(print_df["tip"].sum())}</p>
+                        <p>月客人数 Client Count: {len(print_df)}</p>
+                        {print_df[display_cols].to_html(index=False)}
+                    </body>
+                    </html>
+                    """
+                    with dl2:
+                        st.download_button(
+                            label="下载打印 HTML",
+                            data=printable_html.encode("utf-8"),
+                            file_name=f"{print_therapist}_{print_month}_printable.html",
+                            mime="text/html",
+                            use_container_width=True,
+                        )
+            else:
+                st.warning("暂无可供打印的治疗师数据。")
+
+        with query_tab3:
+            profit_mode = st.radio("查询方式", ["按月查询", "按年查询"], horizontal=True)
+
+            if profit_mode == "按月查询":
+                month_options = sorted(df["month"].dropna().unique().tolist(), reverse=True)
+                selected_profit_month = st.selectbox("月份", month_options, key="profit_month_query")
+                profit_df = df[df["month"] == selected_profit_month].copy()
+                render_money_metrics(summarize_money(profit_df), count_label="记录数")
+
+                month_daily_profit = profit_df.groupby("day", as_index=False).agg(
+                    total_revenue=("total_revenue", "sum"),
                     therapist_income=("therapist_income", "sum"),
                     tip=("tip", "sum"),
+                    profit=("profit", "sum"),
+                ).sort_values("day")
+                st.dataframe(format_display_table(month_daily_profit, ["day", "total_revenue", "therapist_income", "tip", "profit"]), use_container_width=True)
+            else:
+                year_options = sorted(df["year"].dropna().unique().tolist(), reverse=True)
+                selected_profit_year = st.selectbox("年份", year_options, key="profit_year_query")
+                profit_df = df[df["year"] == selected_profit_year].copy()
+                render_money_metrics(summarize_money(profit_df), count_label="记录数")
+
+                year_monthly_profit = profit_df.groupby("month", as_index=False).agg(
                     total_revenue=("total_revenue", "sum"),
-                )
+                    therapist_income=("therapist_income", "sum"),
+                    tip=("tip", "sum"),
+                    profit=("profit", "sum"),
+                ).sort_values("month")
+                st.dataframe(format_display_table(year_monthly_profit, ["month", "total_revenue", "therapist_income", "tip", "profit"]), use_container_width=True)
 
-                monthly_total_revenue = float(print_df["total_revenue"].sum())
-                monthly_total_income = float(print_df["therapist_income"].sum())
-                monthly_total_tip = float(print_df["tip"].sum())
-                monthly_total_clients = int(len(print_df))
+with raw_tab:
+    st.subheader("原始记录")
+    df = get_current_df(worksheet)
 
-                st.markdown(f"### {print_therapist} - {print_month} 工资核对单")
-                st.write(f"月总收入 Total Revenue：${monthly_total_revenue:,.2f}")
-                st.write(f"月工资合计 Therapist Income：${monthly_total_income:,.2f}")
-                st.write(f"月小费合计 Tip：${monthly_total_tip:,.2f}")
-                st.write(f"月客人数 Client Count：{monthly_total_clients}")
+    if df.empty:
+        st.info("暂无原始记录。")
+    else:
+        raw_col1, raw_col2, raw_col3 = st.columns(3)
+        with raw_col1:
+            raw_therapist_options = ["全部"] + sorted([x for x in df["therapist_name"].dropna().astype(str).unique().tolist() if x.strip()])
+            selected_raw_therapist = st.selectbox("治疗师", raw_therapist_options, key="raw_therapist_filter")
+        with raw_col2:
+            selected_raw_payment = st.selectbox("付款方式", ["全部"] + PAYMENT_OPTIONS, key="raw_payment_filter")
+        with raw_col3:
+            raw_client_keyword = st.text_input("客人姓名", key="raw_client_filter")
 
-                st.markdown("#### 每日汇总")
-                st.dataframe(grouped, use_container_width=True)
+        raw_df = df.copy()
+        if selected_raw_therapist != "全部":
+            raw_df = raw_df[raw_df["therapist_name"] == selected_raw_therapist]
+        if selected_raw_payment != "全部":
+            raw_df = raw_df[raw_df["payment_type"] == selected_raw_payment]
+        if raw_client_keyword.strip():
+            raw_df = raw_df[raw_df["client_name"].astype(str).str.contains(raw_client_keyword.strip(), case=False, na=False)]
 
-                st.markdown("#### 每日客人明细")
-                display_cols = [
-                    "day", "client_name", "payment_type", "duration",
-                    "therapist_income", "tip", "total_revenue"
-                ]
-                st.dataframe(print_df[display_cols], use_container_width=True)
-
-                summary_df = pd.DataFrame([
-                    ["月份", print_month],
-                    ["治疗师", print_therapist],
-                    ["本月总收入 Total Revenue", monthly_total_revenue],
-                    ["本月治疗师收入 Therapist Income", monthly_total_income],
-                    ["本月小费 Tip", monthly_total_tip],
-                    ["本月客人数 Client Count", monthly_total_clients],
-                ], columns=["项目", "数值"])
-
-                detail_df = print_df[display_cols].copy()
-
-                csv_text = summary_df.to_csv(index=False) + "\n" + detail_df.to_csv(index=False)
-                csv_data = csv_text.encode("utf-8-sig")
-
-                st.download_button(
-                    label="下载该治疗师该月明细 CSV",
-                    data=csv_data,
-                    file_name=f"{print_therapist}_{print_month}_payroll_detail.csv",
-                    mime="text/csv"
-                )
-
-                printable_html = f"""
-                <html>
-                <head>
-                    <meta charset='utf-8'>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; padding: 20px; }}
-                        h1, h2, h3 {{ margin-bottom: 8px; }}
-                        table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
-                        th, td {{ border: 1px solid #999; padding: 6px; text-align: left; font-size: 12px; }}
-                    </style>
-                </head>
-                <body>
-                    <h1>{print_therapist} - {print_month} 工资核对单</h1>
-                    <p>月总收入 Total Revenue: ${monthly_total_revenue:,.2f}</p>
-                    <p>月工资合计 Therapist Income: ${monthly_total_income:,.2f}</p>
-                    <p>月小费合计 Tip: ${monthly_total_tip:,.2f}</p>
-                    <p>月客人数 Client Count: {monthly_total_clients}</p>
-                    {print_df[display_cols].to_html(index=False)}
-                </body>
-                </html>
-                """
-                st.download_button(
-                    label="下载打印版 HTML",
-                    data=printable_html.encode("utf-8"),
-                    file_name=f"{print_therapist}_{print_month}_printable.html",
-                    mime="text/html"
-                )
-        else:
-            st.warning("暂无可供打印的治疗师数据。")
-
-    with query_tab3:
-        st.subheader("查询每个月甚至每一年的总利润")
-        profit_mode = st.radio("选择查询方式", ["按月查询", "按年查询"], horizontal=True)
-
-        if profit_mode == "按月查询":
-            month_options = sorted(df["month"].dropna().unique().tolist(), reverse=True)
-            selected_profit_month = st.selectbox("选择月份", month_options, key="profit_month_query")
-            month_df = df[df["month"] == selected_profit_month].copy()
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("总收入", f"${month_df['total_revenue'].sum():,.2f}")
-            c2.metric("治疗师工资", f"${month_df['therapist_income'].sum():,.2f}")
-            c3.metric("小费", f"${month_df['tip'].sum():,.2f}")
-            c4.metric("总利润", f"${month_df['profit'].sum():,.2f}")
-
-            month_daily_profit = month_df.groupby("day", as_index=False).agg(
-                total_revenue=("total_revenue", "sum"),
-                therapist_income=("therapist_income", "sum"),
-                tip=("tip", "sum"),
-                profit=("profit", "sum"),
-            ).sort_values("day")
-            st.dataframe(month_daily_profit, use_container_width=True)
-
-        else:
-            year_options = sorted(df["year"].dropna().unique().tolist(), reverse=True)
-            selected_profit_year = st.selectbox("选择年份", year_options, key="profit_year_query")
-            year_df = df[df["year"] == selected_profit_year].copy()
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("总收入", f"${year_df['total_revenue'].sum():,.2f}")
-            c2.metric("治疗师工资", f"${year_df['therapist_income'].sum():,.2f}")
-            c3.metric("小费", f"${year_df['tip'].sum():,.2f}")
-            c4.metric("总利润", f"${year_df['profit'].sum():,.2f}")
-
-            year_monthly_profit = year_df.groupby("month", as_index=False).agg(
-                total_revenue=("total_revenue", "sum"),
-                therapist_income=("therapist_income", "sum"),
-                tip=("tip", "sum"),
-                profit=("profit", "sum"),
-            ).sort_values("month")
-            st.dataframe(year_monthly_profit, use_container_width=True)
-
-# -----------------------------
-# 原始记录
-# -----------------------------
-st.header("原始记录")
-df = get_current_df(worksheet)
-
-if not df.empty:
-    raw_col1, raw_col2, raw_col3 = st.columns(3)
-
-    with raw_col1:
-        raw_therapist_options = ["全部"] + sorted(
-            [x for x in df["therapist_name"].dropna().astype(str).unique().tolist() if x.strip()]
-        )
-        selected_raw_therapist = st.selectbox("按治疗师查询", raw_therapist_options, key="raw_therapist_filter")
-
-    with raw_col2:
-        raw_payment_options = ["全部"] + PAYMENT_OPTIONS
-        selected_raw_payment = st.selectbox("按付款方式查询", raw_payment_options, key="raw_payment_filter")
-
-    with raw_col3:
-        raw_client_keyword = st.text_input("按客人姓名查询", key="raw_client_filter")
-
-    raw_df = df.copy()
-
-    if selected_raw_therapist != "全部":
-        raw_df = raw_df[raw_df["therapist_name"] == selected_raw_therapist]
-
-    if selected_raw_payment != "全部":
-        raw_df = raw_df[raw_df["payment_type"] == selected_raw_payment]
-
-    if raw_client_keyword.strip():
-        raw_df = raw_df[
-            raw_df["client_name"].astype(str).str.contains(raw_client_keyword.strip(), case=False, na=False)
+        show_cols = [
+            "date", "payment_type", "therapist_name", "client_name", "duration",
+            "therapist_income", "tip", "total_revenue", "profit", "created_at",
         ]
-
-    show_cols = [
-        "date", "payment_type", "therapist_name", "client_name", "duration",
-        "therapist_income", "tip", "total_revenue", "profit", "created_at"
-    ]
-    st.dataframe(raw_df[show_cols].sort_values("date", ascending=False), use_container_width=True)
-else:
-    st.info("暂无原始记录。")
+        st.dataframe(format_display_table(raw_df[show_cols].sort_values("date", ascending=False), show_cols), use_container_width=True)

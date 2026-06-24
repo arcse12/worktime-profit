@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import json
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -104,6 +105,33 @@ def calgary_today() -> date:
 # -----------------------------
 # Google Sheets 连接函数
 # -----------------------------
+@st.cache_resource(show_spinner=False, ttl=3600)
+def connect_google_sheet_cached(creds_info_json, sheet_name, worksheet_name):
+    creds_info = json.loads(creds_info_json)
+    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+    client = gspread.authorize(creds)
+
+    try:
+        spreadsheet = client.open(sheet_name)
+    except Exception:
+        spreadsheet = client.create(sheet_name)
+
+    try:
+        worksheet = spreadsheet.worksheet(worksheet_name)
+    except Exception:
+        worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=3000, cols=30)
+        worksheet.append_row(BASE_COLUMNS)
+
+    try:
+        first_row = worksheet.row_values(1)
+        if not first_row:
+            worksheet.append_row(BASE_COLUMNS)
+    except Exception:
+        pass
+
+    return spreadsheet, worksheet
+
+
 def connect_google_sheet():
     if gspread is None or Credentials is None:
         return None, None, "未安装 gspread / google-auth，当前使用本地模式。"
@@ -112,30 +140,11 @@ def connect_google_sheet():
         if "gcp_service_account" not in st.secrets:
             return None, None, "未检测到 Google 凭证，当前使用本地模式。"
 
-        creds_info = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-        client = gspread.authorize(creds)
-
         sheet_name = st.secrets.get("google_sheet", {}).get("sheet_name", SPREADSHEET_NAME)
         worksheet_name = st.secrets.get("google_sheet", {}).get("worksheet_name", WORKSHEET_NAME)
-
-        try:
-            spreadsheet = client.open(sheet_name)
-        except Exception:
-            spreadsheet = client.create(sheet_name)
-
-        try:
-            worksheet = spreadsheet.worksheet(worksheet_name)
-        except Exception:
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=3000, cols=30)
-            worksheet.append_row(BASE_COLUMNS)
-
-        try:
-            first_row = worksheet.row_values(1)
-            if not first_row:
-                worksheet.append_row(BASE_COLUMNS)
-        except Exception:
-            pass
+        creds_info = dict(st.secrets["gcp_service_account"])
+        creds_info_json = json.dumps(creds_info, sort_keys=True)
+        spreadsheet, worksheet = connect_google_sheet_cached(creds_info_json, sheet_name, worksheet_name)
 
         return spreadsheet, worksheet, f"Google Sheets 已连接：{sheet_name} / {worksheet_name}"
     except Exception as e:
@@ -312,6 +321,7 @@ def init_data_cache(worksheet):
         st.session_state.server_data = base_df.copy()
         st.session_state.working_data = base_df.copy()
         st.session_state.data_loaded = True
+        st.session_state.last_data_refresh_at = calgary_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def refresh_from_server(worksheet):
@@ -330,6 +340,7 @@ def refresh_from_server(worksheet):
         "deleted_row_ids": set()
     }
     st.session_state.edit_loaded_uid = None
+    st.session_state.last_data_refresh_at = calgary_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def get_current_df(worksheet):
@@ -483,6 +494,9 @@ if "data_loaded" not in st.session_state:
 if "edit_loaded_uid" not in st.session_state:
     st.session_state.edit_loaded_uid = None
 
+if "last_data_refresh_at" not in st.session_state:
+    st.session_state.last_data_refresh_at = ""
+
 if "entry_date" not in st.session_state:
     st.session_state["entry_date"] = calgary_today()
 if "entry_payment_type" not in st.session_state:
@@ -539,6 +553,9 @@ with st.sidebar:
     else:
         st.success("当前没有待提交更改。")
 
+    if st.session_state.last_data_refresh_at:
+        st.caption(f"上次读取：{st.session_state.last_data_refresh_at}")
+
     submit_label = "提交缓存到 Google Sheets" if worksheet is not None else "保存到本地会话"
     if st.button(submit_label, type="primary", use_container_width=True, disabled=pending_total == 0):
         try:
@@ -565,6 +582,16 @@ with st.sidebar:
         st.session_state.edit_loaded_uid = None
         st.success("已恢复为上次正式数据。")
         st.rerun()
+
+    refresh_disabled = worksheet is None or pending_total > 0
+    if st.button("从 Google Sheets 重新读取", use_container_width=True, disabled=refresh_disabled):
+        with st.spinner("正在读取 Google Sheets..."):
+            refresh_from_server(worksheet)
+        st.success("已读取 Google Sheets 最新数据。")
+        st.rerun()
+
+    if pending_total > 0:
+        st.caption("有缓存更改时，请先提交或放弃，再重新读取云端数据。")
 
     st.markdown("---")
     st.subheader("治疗师管理")

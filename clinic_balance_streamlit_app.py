@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import json
+import hashlib
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -11,6 +12,11 @@ try:
 except Exception:
     gspread = None
     Credentials = None
+
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
 
 st.set_page_config(page_title="诊所收支与工资核对", layout="wide")
 
@@ -72,6 +78,7 @@ DEFAULT_THERAPISTS = ["Jenny", "Janice", "Alex"]
 SPREADSHEET_NAME = "massageprofit"
 WORKSHEET_NAME = "transactions"
 THERAPIST_WORKSHEET_NAME = "therapists"
+SUPABASE_TABLE_NAME = "transactions"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -100,6 +107,126 @@ def calgary_now() -> datetime:
 
 def calgary_today() -> date:
     return calgary_now().date()
+
+
+# -----------------------------
+# Supabase 主数据库
+# -----------------------------
+@st.cache_resource(show_spinner=False, ttl=3600)
+def connect_supabase_cached(url, key):
+    return create_client(url, key)
+
+
+def connect_supabase():
+    if create_client is None:
+        return None, "未安装 supabase，主数据库未启用。"
+
+    try:
+        if "supabase" not in st.secrets:
+            return None, "未配置 Supabase，当前使用 Google Sheets。"
+
+        url = st.secrets["supabase"].get("url", "")
+        key = st.secrets["supabase"].get("key", "")
+        if not url or not key:
+            return None, "Supabase 配置不完整，当前使用 Google Sheets。"
+
+        client = connect_supabase_cached(url, key)
+        return client, "Supabase 已连接，Google Sheets 作为备份。"
+    except Exception as e:
+        return None, f"Supabase 连接失败：{e}"
+
+
+def record_id_for_row(row) -> str:
+    # ponytail: stable enough for legacy Sheet rows; add a real UUID column if exact duplicate rows become common.
+    payload = "|".join(clean_text_cell(row.get(col, "")) for col in BASE_COLUMNS)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def df_to_supabase_rows(df_local):
+    rows = []
+    df_to_save = ensure_columns(df_local.copy())
+    for _, row in df_to_save.iterrows():
+        rows.append({
+            "record_id": record_id_for_row(row),
+            "date": clean_text_cell(row["date"]),
+            "payment_type": clean_text_cell(row["payment_type"]),
+            "therapist_name": clean_text_cell(row["therapist_name"]),
+            "client_name": clean_text_cell(row["client_name"]),
+            "duration": clean_text_cell(row["duration"]),
+            "therapist_income": clean_numeric_cell(row["therapist_income"]),
+            "tip": clean_numeric_cell(row["tip"]),
+            "total_revenue": clean_numeric_cell(row["total_revenue"]),
+            "profit": clean_numeric_cell(row["profit"]),
+            "created_at": clean_text_cell(row["created_at"]),
+            "is_deleted": False,
+            "synced_at": calgary_now().isoformat(),
+        })
+    return rows
+
+
+def load_data_from_supabase(supabase_client):
+    try:
+        rows = []
+        start = 0
+        page_size = 1000
+        while True:
+            response = (
+                supabase_client.table(SUPABASE_TABLE_NAME)
+                .select(",".join(BASE_COLUMNS))
+                .eq("is_deleted", False)
+                .range(start, start + page_size - 1)
+                .execute()
+            )
+            batch = response.data or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                break
+            start += page_size
+
+        if not rows:
+            return pd.DataFrame(columns=BASE_COLUMNS)
+        return ensure_columns(pd.DataFrame(rows))
+    except Exception:
+        return pd.DataFrame(columns=BASE_COLUMNS)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def load_data_from_supabase_cached(_supabase_client):
+    return load_data_from_supabase(_supabase_client)
+
+
+def save_supabase_snapshot(supabase_client, df_local):
+    rows = df_to_supabase_rows(df_local)
+    active_ids = {row["record_id"] for row in rows}
+
+    for i in range(0, len(rows), 500):
+        supabase_client.table(SUPABASE_TABLE_NAME).upsert(rows[i:i + 500], on_conflict="record_id").execute()
+
+    existing_ids = []
+    start = 0
+    page_size = 1000
+    while True:
+        response = (
+            supabase_client.table(SUPABASE_TABLE_NAME)
+            .select("record_id")
+            .eq("is_deleted", False)
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        batch = response.data or []
+        existing_ids.extend(row["record_id"] for row in batch)
+        if len(batch) < page_size:
+            break
+        start += page_size
+
+    stale_ids = [record_id for record_id in existing_ids if record_id not in active_ids]
+    for i in range(0, len(stale_ids), 500):
+        supabase_client.table(SUPABASE_TABLE_NAME).update({
+            "is_deleted": True,
+            "synced_at": calgary_now().isoformat(),
+        }).in_("record_id", stale_ids[i:i + 500]).execute()
+
+    load_data_from_supabase_cached.clear()
 
 
 # -----------------------------
@@ -162,6 +289,11 @@ def get_or_create_therapist_worksheet(spreadsheet):
     return ws
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_therapists_cached(_spreadsheet):
+    return load_therapists_from_sheet(_spreadsheet)
+
+
 def load_therapists_from_sheet(spreadsheet):
     try:
         ws = get_or_create_therapist_worksheet(spreadsheet)
@@ -183,6 +315,7 @@ def save_therapists_to_sheet(spreadsheet, therapists):
         clean_name = str(name).strip()
         if clean_name:
             ws.append_row([clean_name])
+    load_therapists_cached.clear()
 
 
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -204,13 +337,25 @@ def therapist_select_options(include_blank=True, blank_text=""):
 
 def load_data_from_sheet(worksheet):
     try:
-        records = worksheet.get_all_records()
-        if not records:
+        values = worksheet.get("A:J")
+        if len(values) <= 1:
             return pd.DataFrame(columns=BASE_COLUMNS)
-        df = pd.DataFrame(records)
+
+        rows = []
+        for row in values[1:]:
+            if not any(str(cell).strip() for cell in row):
+                continue
+            rows.append((row + [""] * len(BASE_COLUMNS))[:len(BASE_COLUMNS)])
+
+        df = pd.DataFrame(rows, columns=BASE_COLUMNS)
         return ensure_columns(df)
     except Exception:
         return pd.DataFrame(columns=BASE_COLUMNS)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def load_data_from_sheet_cached(_worksheet):
+    return load_data_from_sheet(_worksheet)
 
 
 def append_row_to_sheet(worksheet, row_data):
@@ -262,6 +407,7 @@ def overwrite_sheet_with_df(worksheet, df_local):
 
     worksheet.clear()
     worksheet.update(f"A1:J{len(rows)}", rows, value_input_option="USER_ENTERED")
+    load_data_from_sheet_cached.clear()
 
 
 def save_local_update(df_local, row_index, row_dict):
@@ -310,10 +456,12 @@ def prepare_display_df(df_local, worksheet):
     return df_local
 
 
-def init_data_cache(worksheet):
+def init_data_cache(supabase_client, worksheet):
     if not st.session_state.data_loaded:
-        if worksheet is not None:
-            base_df = load_data_from_sheet(worksheet)
+        if supabase_client is not None:
+            base_df = load_data_from_supabase_cached(supabase_client)
+        elif worksheet is not None:
+            base_df = load_data_from_sheet_cached(worksheet)
         else:
             base_df = st.session_state.local_data.copy()
 
@@ -324,8 +472,15 @@ def init_data_cache(worksheet):
         st.session_state.last_data_refresh_at = calgary_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def refresh_from_server(worksheet):
-    if worksheet is not None:
+def refresh_from_server(supabase_client, worksheet):
+    if supabase_client is not None:
+        load_data_from_supabase_cached.clear()
+        fresh_df = load_data_from_supabase(supabase_client)
+        fresh_df = ensure_columns(fresh_df)
+        st.session_state.server_data = fresh_df.copy()
+        st.session_state.working_data = fresh_df.copy()
+    elif worksheet is not None:
+        load_data_from_sheet_cached.clear()
         fresh_df = load_data_from_sheet(worksheet)
         fresh_df = ensure_columns(fresh_df)
         st.session_state.server_data = fresh_df.copy()
@@ -464,11 +619,12 @@ def sync_edit_income():
 # -----------------------------
 # 初始化
 # -----------------------------
+supabase_client, supabase_message = connect_supabase()
 spreadsheet, worksheet, gs_message = connect_google_sheet()
 
 if "therapists" not in st.session_state:
     if spreadsheet is not None:
-        st.session_state.therapists = load_therapists_from_sheet(spreadsheet)
+        st.session_state.therapists = load_therapists_cached(spreadsheet)
     else:
         st.session_state.therapists = DEFAULT_THERAPISTS.copy()
 
@@ -514,7 +670,7 @@ if "entry_tip" not in st.session_state:
 if "entry_therapist_income" not in st.session_state:
     st.session_state["entry_therapist_income"] = float(DURATION_RATE_MAP[st.session_state["entry_duration"]])
 
-init_data_cache(worksheet)
+init_data_cache(supabase_client, worksheet)
 df = get_current_df(worksheet)
 
 # -----------------------------
@@ -524,12 +680,19 @@ df = get_current_df(worksheet)
 pending_new, pending_update, pending_delete = pending_counts()
 pending_total = pending_new + pending_update + pending_delete
 
-status_text = "Google Sheets 已连接" if worksheet is not None else "本地会话模式"
-status_class = "success" if worksheet is not None else "warning"
+if supabase_client is not None:
+    status_text = "Supabase 主库已连接"
+    storage_message = f"{supabase_message}；{gs_message}"
+elif worksheet is not None:
+    status_text = "Google Sheets 已连接"
+    storage_message = gs_message
+else:
+    status_text = "本地会话模式"
+    storage_message = gs_message
 st.markdown(
     f"""
     <div class="status-strip">
-        <strong>{status_text}</strong>　{gs_message}<br>
+        <strong>{status_text}</strong>　{storage_message}<br>
         待提交：新增 {pending_new} 条，修改 {pending_update} 条，删除 {pending_delete} 条。
     </div>
     """,
@@ -556,17 +719,24 @@ with st.sidebar:
     if st.session_state.last_data_refresh_at:
         st.caption(f"上次读取：{st.session_state.last_data_refresh_at}")
 
-    submit_label = "提交缓存到 Google Sheets" if worksheet is not None else "保存到本地会话"
+    submit_label = "提交到 Supabase 并备份 Google Sheets" if supabase_client is not None else ("提交缓存到 Google Sheets" if worksheet is not None else "保存到本地会话")
     if st.button(submit_label, type="primary", use_container_width=True, disabled=pending_total == 0):
         try:
-            if worksheet is not None:
+            if supabase_client is not None:
+                save_supabase_snapshot(supabase_client, st.session_state.working_data)
+                if worksheet is not None:
+                    overwrite_sheet_with_df(worksheet, st.session_state.working_data)
+                refresh_from_server(supabase_client, worksheet)
+                st.success("已提交到 Supabase，并备份到 Google Sheets。")
+                st.rerun()
+            elif worksheet is not None:
                 overwrite_sheet_with_df(worksheet, st.session_state.working_data)
-                refresh_from_server(worksheet)
+                refresh_from_server(supabase_client, worksheet)
                 st.success("所有缓存更改已提交到 Google Sheets。")
                 st.rerun()
             else:
                 st.session_state.local_data = st.session_state.working_data.copy()
-                refresh_from_server(worksheet)
+                refresh_from_server(supabase_client, worksheet)
                 st.success("临时更改已正式保存到本地会话。")
                 st.rerun()
         except Exception as e:
@@ -583,15 +753,25 @@ with st.sidebar:
         st.success("已恢复为上次正式数据。")
         st.rerun()
 
-    refresh_disabled = worksheet is None or pending_total > 0
-    if st.button("从 Google Sheets 重新读取", use_container_width=True, disabled=refresh_disabled):
-        with st.spinner("正在读取 Google Sheets..."):
-            refresh_from_server(worksheet)
-        st.success("已读取 Google Sheets 最新数据。")
+    refresh_disabled = (supabase_client is None and worksheet is None) or pending_total > 0
+    refresh_label = "从 Supabase 重新读取" if supabase_client is not None else "从 Google Sheets 重新读取"
+    if st.button(refresh_label, use_container_width=True, disabled=refresh_disabled):
+        with st.spinner("正在读取数据..."):
+            refresh_from_server(supabase_client, worksheet)
+        st.success("已读取最新数据。")
         st.rerun()
 
     if pending_total > 0:
         st.caption("有缓存更改时，请先提交或放弃，再重新读取云端数据。")
+
+    if supabase_client is not None and worksheet is not None:
+        if st.button("从 Google Sheet 导入 Supabase", use_container_width=True, disabled=pending_total > 0):
+            with st.spinner("正在导入 Supabase..."):
+                sheet_df = load_data_from_sheet(worksheet)
+                save_supabase_snapshot(supabase_client, sheet_df)
+                refresh_from_server(supabase_client, worksheet)
+            st.success("已从 Google Sheet 导入 Supabase。")
+            st.rerun()
 
     st.markdown("---")
     st.subheader("治疗师管理")

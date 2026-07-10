@@ -136,18 +136,18 @@ def connect_supabase():
         return None, f"Supabase 连接失败：{e}"
 
 
-def record_id_for_row(row) -> str:
-    # ponytail: stable enough for legacy Sheet rows; add a real UUID column if exact duplicate rows become common.
-    payload = "|".join(clean_text_cell(row.get(col, "")) for col in BASE_COLUMNS)
+def record_id_for_row(row, row_index) -> str:
+    # ponytail: row index preserves duplicate legacy Sheet rows; add UUIDs if rows need stable identity across reordering.
+    payload = f"{row_index}|" + "|".join(clean_text_cell(row.get(col, "")) for col in BASE_COLUMNS)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def df_to_supabase_rows(df_local):
     rows = []
     df_to_save = ensure_columns(df_local.copy())
-    for _, row in df_to_save.iterrows():
+    for row_index, (_, row) in enumerate(df_to_save.iterrows()):
         rows.append({
-            "record_id": record_id_for_row(row),
+            "record_id": record_id_for_row(row, row_index),
             "date": clean_text_cell(row["date"]),
             "payment_type": clean_text_cell(row["payment_type"]),
             "therapist_name": clean_text_cell(row["therapist_name"]),
@@ -769,12 +769,15 @@ with st.sidebar:
 
     if supabase_client is not None and worksheet is not None:
         if st.button("从 Google Sheet 导入 Supabase", use_container_width=True, disabled=pending_total > 0):
-            with st.spinner("正在导入 Supabase..."):
-                sheet_df = load_data_from_sheet(worksheet)
-                save_supabase_snapshot(supabase_client, sheet_df)
-                refresh_from_server(supabase_client, worksheet)
-            st.success("已从 Google Sheet 导入 Supabase。")
-            st.rerun()
+            try:
+                with st.spinner("正在导入 Supabase..."):
+                    sheet_df = load_data_from_sheet(worksheet)
+                    save_supabase_snapshot(supabase_client, sheet_df)
+                    refresh_from_server(supabase_client, worksheet)
+                st.success("已从 Google Sheet 导入 Supabase。")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
 
     st.markdown("---")
     st.subheader("治疗师管理")

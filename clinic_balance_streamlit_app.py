@@ -196,37 +196,40 @@ def load_data_from_supabase_cached(_supabase_client):
 
 
 def save_supabase_snapshot(supabase_client, df_local):
-    rows = df_to_supabase_rows(df_local)
-    active_ids = {row["record_id"] for row in rows}
+    try:
+        rows = df_to_supabase_rows(df_local)
+        active_ids = {row["record_id"] for row in rows}
 
-    for i in range(0, len(rows), 500):
-        supabase_client.table(SUPABASE_TABLE_NAME).upsert(rows[i:i + 500], on_conflict="record_id").execute()
+        for i in range(0, len(rows), 500):
+            supabase_client.table(SUPABASE_TABLE_NAME).upsert(rows[i:i + 500], on_conflict="record_id").execute()
 
-    existing_ids = []
-    start = 0
-    page_size = 1000
-    while True:
-        response = (
-            supabase_client.table(SUPABASE_TABLE_NAME)
-            .select("record_id")
-            .eq("is_deleted", False)
-            .range(start, start + page_size - 1)
-            .execute()
-        )
-        batch = response.data or []
-        existing_ids.extend(row["record_id"] for row in batch)
-        if len(batch) < page_size:
-            break
-        start += page_size
+        existing_ids = []
+        start = 0
+        page_size = 1000
+        while True:
+            response = (
+                supabase_client.table(SUPABASE_TABLE_NAME)
+                .select("record_id")
+                .eq("is_deleted", False)
+                .range(start, start + page_size - 1)
+                .execute()
+            )
+            batch = response.data or []
+            existing_ids.extend(row["record_id"] for row in batch)
+            if len(batch) < page_size:
+                break
+            start += page_size
 
-    stale_ids = [record_id for record_id in existing_ids if record_id not in active_ids]
-    for i in range(0, len(stale_ids), 500):
-        supabase_client.table(SUPABASE_TABLE_NAME).update({
-            "is_deleted": True,
-            "synced_at": calgary_now().isoformat(),
-        }).in_("record_id", stale_ids[i:i + 500]).execute()
+        stale_ids = [record_id for record_id in existing_ids if record_id not in active_ids]
+        for i in range(0, len(stale_ids), 500):
+            supabase_client.table(SUPABASE_TABLE_NAME).update({
+                "is_deleted": True,
+                "synced_at": calgary_now().isoformat(),
+            }).in_("record_id", stale_ids[i:i + 500]).execute()
 
-    load_data_from_supabase_cached.clear()
+        load_data_from_supabase_cached.clear()
+    except Exception as e:
+        raise RuntimeError(f"Supabase 保存失败：{e}") from e
 
 
 # -----------------------------

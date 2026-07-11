@@ -79,6 +79,7 @@ SPREADSHEET_NAME = "massageprofit"
 WORKSHEET_NAME = "transactions"
 THERAPIST_WORKSHEET_NAME = "therapists"
 SUPABASE_TABLE_NAME = "transactions"
+SUPABASE_BATCH_SIZE = 100
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -200,8 +201,11 @@ def save_supabase_snapshot(supabase_client, df_local):
         rows = df_to_supabase_rows(df_local)
         active_ids = {row["record_id"] for row in rows}
 
-        for i in range(0, len(rows), 500):
-            supabase_client.table(SUPABASE_TABLE_NAME).upsert(rows[i:i + 500], on_conflict="record_id").execute()
+        for i in range(0, len(rows), SUPABASE_BATCH_SIZE):
+            supabase_client.table(SUPABASE_TABLE_NAME).upsert(
+                rows[i:i + SUPABASE_BATCH_SIZE],
+                on_conflict="record_id",
+            ).execute()
 
         existing_ids = []
         start = 0
@@ -221,11 +225,11 @@ def save_supabase_snapshot(supabase_client, df_local):
             start += page_size
 
         stale_ids = [record_id for record_id in existing_ids if record_id not in active_ids]
-        for i in range(0, len(stale_ids), 500):
+        for i in range(0, len(stale_ids), SUPABASE_BATCH_SIZE):
             supabase_client.table(SUPABASE_TABLE_NAME).update({
                 "is_deleted": True,
                 "synced_at": calgary_now().isoformat(),
-            }).in_("record_id", stale_ids[i:i + 500]).execute()
+            }).in_("record_id", stale_ids[i:i + SUPABASE_BATCH_SIZE]).execute()
 
         load_data_from_supabase_cached.clear()
     except Exception as e:

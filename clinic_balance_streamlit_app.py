@@ -59,7 +59,7 @@ st.markdown(
 )
 
 st.title("诊所收支与工资核对")
-st.caption("新增、修改、删除都会先进入缓存；确认无误后快速提交到 Supabase。日期按 Calgary 时区。")
+st.caption("新增、修改、删除都会先进入缓存；确认无误后统一提交到 Google Sheets。日期按 Calgary 时区。")
 
 # -----------------------------
 # 基础配置
@@ -472,6 +472,25 @@ def overwrite_sheet_with_df(worksheet, df_local):
     load_data_from_sheet_cached.clear()
 
 
+def save_sheet_delta(worksheet, server_df, pending_changes):
+    for row in pending_changes["new_rows"]:
+        append_row_to_sheet(worksheet, row_to_sheet_values(row))
+
+    for row_id, row in pending_changes["updated_rows"].items():
+        if 0 <= row_id < len(server_df):
+            update_row_in_sheet(worksheet, row_id + 2, row_to_sheet_values(row))
+
+    delete_rows = [
+        row_id + 2
+        for row_id in pending_changes["deleted_row_ids"]
+        if 0 <= row_id < len(server_df)
+    ]
+    if delete_rows:
+        delete_rows_from_sheet(worksheet, sorted(delete_rows, reverse=True))
+
+    load_data_from_sheet_cached.clear()
+
+
 def save_local_update(df_local, row_index, row_dict):
     for key, value in row_dict.items():
         df_local.at[row_index, key] = value
@@ -692,7 +711,8 @@ def sync_edit_income():
 # -----------------------------
 # 初始化
 # -----------------------------
-supabase_client, supabase_message = connect_supabase()
+supabase_client = None
+supabase_message = "Supabase 已停用，当前使用 Google Sheets。"
 spreadsheet, worksheet, gs_message = connect_google_sheet()
 
 if "therapists" not in st.session_state:
@@ -809,11 +829,11 @@ with st.sidebar:
                 st.success("已快速提交到 Supabase。新增记录已备份到 Google Sheets；修改/删除可用下方按钮手动同步备份。")
                 st.rerun()
             elif worksheet is not None:
-                if only_new_rows:
-                    for row in st.session_state.pending_changes["new_rows"]:
-                        append_row_to_sheet(worksheet, row_to_sheet_values(row))
-                else:
-                    overwrite_sheet_with_df(worksheet, st.session_state.working_data)
+                save_sheet_delta(
+                    worksheet,
+                    st.session_state.server_data,
+                    st.session_state.pending_changes,
+                )
                 accept_working_data_as_saved()
                 st.success("所有缓存更改已提交到 Google Sheets。")
                 st.rerun()

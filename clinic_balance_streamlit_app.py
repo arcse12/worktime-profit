@@ -147,22 +147,33 @@ def df_to_supabase_rows(df_local):
     rows = []
     df_to_save = ensure_columns(df_local.copy())
     for row_index, (_, row) in enumerate(df_to_save.iterrows()):
-        rows.append({
-            "record_id": record_id_for_row(row, row_index),
-            "date": clean_text_cell(row["date"]),
-            "payment_type": clean_text_cell(row["payment_type"]),
-            "therapist_name": clean_text_cell(row["therapist_name"]),
-            "client_name": clean_text_cell(row["client_name"]),
-            "duration": clean_text_cell(row["duration"]),
-            "therapist_income": clean_numeric_cell(row["therapist_income"]),
-            "tip": clean_numeric_cell(row["tip"]),
-            "total_revenue": clean_numeric_cell(row["total_revenue"]),
-            "profit": clean_numeric_cell(row["profit"]),
-            "created_at": clean_text_cell(row["created_at"]),
-            "is_deleted": False,
-            "synced_at": calgary_now().isoformat(),
-        })
+        rows.append(row_to_supabase_payload(row, row_index))
     return rows
+
+
+def row_to_supabase_payload(row, row_index):
+    return {
+        "record_id": record_id_for_row(row, row_index),
+        "date": clean_text_cell(row["date"]),
+        "payment_type": clean_text_cell(row["payment_type"]),
+        "therapist_name": clean_text_cell(row["therapist_name"]),
+        "client_name": clean_text_cell(row["client_name"]),
+        "duration": clean_text_cell(row["duration"]),
+        "therapist_income": clean_numeric_cell(row["therapist_income"]),
+        "tip": clean_numeric_cell(row["tip"]),
+        "total_revenue": clean_numeric_cell(row["total_revenue"]),
+        "profit": clean_numeric_cell(row["profit"]),
+        "created_at": clean_text_cell(row["created_at"]),
+        "is_deleted": False,
+        "synced_at": calgary_now().isoformat(),
+    }
+
+
+def save_new_rows_to_supabase(supabase_client, new_rows, start_index):
+    rows = [row_to_supabase_payload(row, start_index + i) for i, row in enumerate(new_rows)]
+    if rows:
+        supabase_client.table(SUPABASE_TABLE_NAME).upsert(rows, on_conflict="record_id").execute()
+        load_data_from_supabase_cached.clear()
 
 
 def load_data_from_supabase(supabase_client):
@@ -367,6 +378,7 @@ def load_data_from_sheet_cached(_worksheet):
 
 def append_row_to_sheet(worksheet, row_data):
     worksheet.append_row(row_data, value_input_option="USER_ENTERED")
+    load_data_from_sheet_cached.clear()
 
 
 def update_row_in_sheet(worksheet, row_number, row_data):
@@ -393,24 +405,27 @@ def clean_numeric_cell(value) -> float:
     return float(numeric_value)
 
 
+def row_to_sheet_values(row):
+    return [
+        clean_text_cell(row["date"]),
+        clean_text_cell(row["payment_type"]),
+        clean_text_cell(row["therapist_name"]),
+        clean_text_cell(row["client_name"]),
+        clean_text_cell(row["duration"]),
+        clean_numeric_cell(row["therapist_income"]),
+        clean_numeric_cell(row["tip"]),
+        clean_numeric_cell(row["total_revenue"]),
+        clean_numeric_cell(row["profit"]),
+        clean_text_cell(row["created_at"]),
+    ]
+
 
 def overwrite_sheet_with_df(worksheet, df_local):
     df_to_save = ensure_columns(df_local.copy())
 
     rows = [BASE_COLUMNS]
     for _, row in df_to_save.iterrows():
-        rows.append([
-            clean_text_cell(row["date"]),
-            clean_text_cell(row["payment_type"]),
-            clean_text_cell(row["therapist_name"]),
-            clean_text_cell(row["client_name"]),
-            clean_text_cell(row["duration"]),
-            clean_numeric_cell(row["therapist_income"]),
-            clean_numeric_cell(row["tip"]),
-            clean_numeric_cell(row["total_revenue"]),
-            clean_numeric_cell(row["profit"]),
-            clean_text_cell(row["created_at"]),
-        ])
+        rows.append(row_to_sheet_values(row))
 
     worksheet.clear()
     worksheet.update(f"A1:J{len(rows)}", rows, value_input_option="USER_ENTERED")
@@ -496,6 +511,17 @@ def refresh_from_server(supabase_client, worksheet):
         st.session_state.server_data = st.session_state.local_data.copy()
         st.session_state.working_data = st.session_state.local_data.copy()
 
+    st.session_state.pending_changes = {
+        "new_rows": [],
+        "updated_rows": {},
+        "deleted_row_ids": set()
+    }
+    st.session_state.edit_loaded_uid = None
+    st.session_state.last_data_refresh_at = calgary_now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def accept_working_data_as_saved():
+    st.session_state.server_data = st.session_state.working_data.copy()
     st.session_state.pending_changes = {
         "new_rows": [],
         "updated_rows": {},
@@ -729,21 +755,36 @@ with st.sidebar:
     submit_label = "提交到 Supabase 并备份 Google Sheets" if supabase_client is not None else ("提交缓存到 Google Sheets" if worksheet is not None else "保存到本地会话")
     if st.button(submit_label, type="primary", use_container_width=True, disabled=pending_total == 0):
         try:
+            only_new_rows = pending_new > 0 and pending_update == 0 and pending_delete == 0
             if supabase_client is not None:
-                save_supabase_snapshot(supabase_client, st.session_state.working_data)
-                if worksheet is not None:
-                    overwrite_sheet_with_df(worksheet, st.session_state.working_data)
-                refresh_from_server(supabase_client, worksheet)
+                if only_new_rows:
+                    save_new_rows_to_supabase(
+                        supabase_client,
+                        st.session_state.pending_changes["new_rows"],
+                        len(st.session_state.server_data),
+                    )
+                    if worksheet is not None:
+                        for row in st.session_state.pending_changes["new_rows"]:
+                            append_row_to_sheet(worksheet, row_to_sheet_values(row))
+                else:
+                    save_supabase_snapshot(supabase_client, st.session_state.working_data)
+                    if worksheet is not None:
+                        overwrite_sheet_with_df(worksheet, st.session_state.working_data)
+                accept_working_data_as_saved()
                 st.success("已提交到 Supabase，并备份到 Google Sheets。")
                 st.rerun()
             elif worksheet is not None:
-                overwrite_sheet_with_df(worksheet, st.session_state.working_data)
-                refresh_from_server(supabase_client, worksheet)
+                if only_new_rows:
+                    for row in st.session_state.pending_changes["new_rows"]:
+                        append_row_to_sheet(worksheet, row_to_sheet_values(row))
+                else:
+                    overwrite_sheet_with_df(worksheet, st.session_state.working_data)
+                accept_working_data_as_saved()
                 st.success("所有缓存更改已提交到 Google Sheets。")
                 st.rerun()
             else:
                 st.session_state.local_data = st.session_state.working_data.copy()
-                refresh_from_server(supabase_client, worksheet)
+                accept_working_data_as_saved()
                 st.success("临时更改已正式保存到本地会话。")
                 st.rerun()
         except Exception as e:

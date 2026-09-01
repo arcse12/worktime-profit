@@ -58,7 +58,7 @@ st.markdown(
 )
 
 st.title("诊所收支与工资核对")
-st.caption("新增、修改、删除都会先进入缓存；确认无误后再统一提交到 Google Sheets。日期按 Calgary 时区。")
+st.caption("新增、修改、删除都会先进入缓存；确认无误后快速提交到 Supabase。日期按 Calgary 时区。")
 
 # -----------------------------
 # 基础配置
@@ -170,11 +170,44 @@ def row_to_supabase_payload(row, row_index):
     }
 
 
-def save_new_rows_to_supabase(supabase_client, new_rows, start_index):
-    rows = [row_to_supabase_payload(row, start_index + i) for i, row in enumerate(new_rows)]
-    if rows:
-        supabase_client.table(SUPABASE_TABLE_NAME).upsert(rows, on_conflict="record_id").execute()
+def save_supabase_delta(supabase_client, server_df, pending_changes):
+    try:
+        server_df = ensure_columns(server_df.copy())
+
+        delete_ids = set()
+        for row_id in pending_changes["deleted_row_ids"]:
+            if 0 <= row_id < len(server_df):
+                delete_ids.add(record_id_for_row(server_df.iloc[row_id], row_id))
+
+        update_rows = []
+        for row_id, row in pending_changes["updated_rows"].items():
+            if 0 <= row_id < len(server_df):
+                delete_ids.add(record_id_for_row(server_df.iloc[row_id], row_id))
+                update_rows.append(row_to_supabase_payload(row, row_id))
+
+        new_rows = pending_changes["new_rows"]
+        if new_rows:
+            update_rows.extend(
+                row_to_supabase_payload(row, len(server_df) + i)
+                for i, row in enumerate(new_rows)
+            )
+
+        delete_ids = list(delete_ids)
+        for i in range(0, len(delete_ids), SUPABASE_BATCH_SIZE):
+            supabase_client.table(SUPABASE_TABLE_NAME).delete().in_(
+                "record_id",
+                delete_ids[i:i + SUPABASE_BATCH_SIZE],
+            ).execute()
+
+        for i in range(0, len(update_rows), SUPABASE_BATCH_SIZE):
+            supabase_client.table(SUPABASE_TABLE_NAME).upsert(
+                update_rows[i:i + SUPABASE_BATCH_SIZE],
+                on_conflict="record_id",
+            ).execute()
+
         load_data_from_supabase_cached.clear()
+    except Exception as e:
+        raise RuntimeError(f"Supabase 保存失败：{e}") from e
 
 
 def load_data_from_supabase(supabase_client):
@@ -754,26 +787,21 @@ with st.sidebar:
     if st.session_state.last_data_refresh_at:
         st.caption(f"上次读取：{st.session_state.last_data_refresh_at}")
 
-    submit_label = "提交到 Supabase 并备份 Google Sheets" if supabase_client is not None else ("提交缓存到 Google Sheets" if worksheet is not None else "保存到本地会话")
+    submit_label = "快速提交到 Supabase" if supabase_client is not None else ("提交缓存到 Google Sheets" if worksheet is not None else "保存到本地会话")
     if st.button(submit_label, type="primary", use_container_width=True, disabled=pending_total == 0):
         try:
             only_new_rows = pending_new > 0 and pending_update == 0 and pending_delete == 0
             if supabase_client is not None:
-                if only_new_rows:
-                    save_new_rows_to_supabase(
-                        supabase_client,
-                        st.session_state.pending_changes["new_rows"],
-                        len(st.session_state.server_data),
-                    )
-                    if worksheet is not None:
-                        for row in st.session_state.pending_changes["new_rows"]:
-                            append_row_to_sheet(worksheet, row_to_sheet_values(row))
-                else:
-                    save_supabase_snapshot(supabase_client, st.session_state.working_data)
-                    if worksheet is not None:
-                        overwrite_sheet_with_df(worksheet, st.session_state.working_data)
+                save_supabase_delta(
+                    supabase_client,
+                    st.session_state.server_data,
+                    st.session_state.pending_changes,
+                )
+                if only_new_rows and worksheet is not None:
+                    for row in st.session_state.pending_changes["new_rows"]:
+                        append_row_to_sheet(worksheet, row_to_sheet_values(row))
                 accept_working_data_as_saved()
-                st.success("已提交到 Supabase，并备份到 Google Sheets。")
+                st.success("已快速提交到 Supabase。新增记录已备份到 Google Sheets；修改/删除可用下方按钮手动同步备份。")
                 st.rerun()
             elif worksheet is not None:
                 if only_new_rows:
@@ -815,6 +843,14 @@ with st.sidebar:
         st.caption("有缓存更改时，请先提交或放弃，再重新读取云端数据。")
 
     if supabase_client is not None and worksheet is not None:
+        if st.button("同步备份到 Google Sheets", use_container_width=True, disabled=pending_total > 0):
+            try:
+                with st.spinner("正在同步备份..."):
+                    overwrite_sheet_with_df(worksheet, st.session_state.server_data)
+                st.success("已同步备份到 Google Sheets。")
+            except Exception as e:
+                st.error(f"备份失败：{e}")
+
         if st.button("从 Google Sheet 导入 Supabase", use_container_width=True, disabled=pending_total > 0):
             try:
                 with st.spinner("正在导入 Supabase..."):

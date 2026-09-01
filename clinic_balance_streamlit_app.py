@@ -82,6 +82,7 @@ THERAPIST_WORKSHEET_NAME = "therapists"
 SUPABASE_TABLE_NAME = "transactions"
 SUPABASE_BATCH_SIZE = 100
 SUPABASE_READ_LIMIT = 2000
+SHEET_RECENT_ROWS = 1000
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -100,7 +101,7 @@ BASE_COLUMNS = [
     "profit",
     "created_at",
 ]
-INTERNAL_COLUMNS = ["_record_id"]
+INTERNAL_COLUMNS = ["_record_id", "_sheet_row_number"]
 
 CALGARY_TZ = ZoneInfo("America/Edmonton")
 
@@ -393,27 +394,40 @@ def therapist_select_options(include_blank=True, blank_text=""):
     return therapists
 
 
-def load_data_from_sheet(worksheet):
+def load_data_from_sheet(worksheet, recent_only=True):
     try:
-        values = worksheet.get("A:J")
-        if len(values) <= 1:
+        if recent_only:
+            date_values = worksheet.col_values(1)
+            last_row = len(date_values)
+            if last_row <= 1:
+                return pd.DataFrame(columns=BASE_COLUMNS)
+            start_row = max(2, last_row - SHEET_RECENT_ROWS + 1)
+            values = worksheet.get(f"A{start_row}:J{last_row}")
+        else:
+            start_row = 2
+            values = worksheet.get("A:J")[1:]
+
+        if not values:
             return pd.DataFrame(columns=BASE_COLUMNS)
 
         rows = []
-        for row in values[1:]:
+        sheet_row_numbers = []
+        for offset, row in enumerate(values):
             if not any(str(cell).strip() for cell in row):
                 continue
             rows.append((row + [""] * len(BASE_COLUMNS))[:len(BASE_COLUMNS)])
+            sheet_row_numbers.append(start_row + offset)
 
         df = pd.DataFrame(rows, columns=BASE_COLUMNS)
+        df["_sheet_row_number"] = sheet_row_numbers
         return ensure_columns(df)
     except Exception:
         return pd.DataFrame(columns=BASE_COLUMNS)
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def load_data_from_sheet_cached(_worksheet):
-    return load_data_from_sheet(_worksheet)
+def load_data_from_sheet_cached(_worksheet, recent_only=True):
+    return load_data_from_sheet(_worksheet, recent_only=recent_only)
 
 
 def append_row_to_sheet(worksheet, row_data):
@@ -472,16 +486,21 @@ def overwrite_sheet_with_df(worksheet, df_local):
     load_data_from_sheet_cached.clear()
 
 
+def sheet_row_number_for(server_df, row_id):
+    value = server_df.iloc[row_id].get("_sheet_row_number", row_id + 2)
+    return row_id + 2 if pd.isna(value) else int(value)
+
+
 def save_sheet_delta(worksheet, server_df, pending_changes):
     for row in pending_changes["new_rows"]:
         append_row_to_sheet(worksheet, row_to_sheet_values(row))
 
     for row_id, row in pending_changes["updated_rows"].items():
         if 0 <= row_id < len(server_df):
-            update_row_in_sheet(worksheet, row_id + 2, row_to_sheet_values(row))
+            update_row_in_sheet(worksheet, sheet_row_number_for(server_df, row_id), row_to_sheet_values(row))
 
     delete_rows = [
-        row_id + 2
+        sheet_row_number_for(server_df, row_id)
         for row_id in pending_changes["deleted_row_ids"]
         if 0 <= row_id < len(server_df)
     ]
@@ -524,7 +543,9 @@ def prepare_display_df(df_local, worksheet):
 
     df_local = df_local.reset_index(drop=True).copy()
     df_local["row_id"] = df_local.index
-    if worksheet is not None:
+    if "_sheet_row_number" in df_local.columns:
+        df_local["sheet_row_number"] = pd.to_numeric(df_local["_sheet_row_number"], errors="coerce").astype("Int64")
+    elif worksheet is not None:
         df_local["sheet_row_number"] = df_local.index + 2
     else:
         df_local["sheet_row_number"] = None
@@ -550,10 +571,11 @@ def init_data_cache(supabase_client, worksheet):
         st.session_state.server_data = base_df.copy()
         st.session_state.working_data = base_df.copy()
         st.session_state.data_loaded = True
+        st.session_state.data_scope = "最近数据"
         st.session_state.last_data_refresh_at = calgary_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def refresh_from_server(supabase_client, worksheet):
+def refresh_from_server(supabase_client, worksheet, recent_only=True):
     if supabase_client is not None:
         load_data_from_supabase_cached.clear()
         fresh_df = load_data_from_supabase(supabase_client)
@@ -562,7 +584,7 @@ def refresh_from_server(supabase_client, worksheet):
         st.session_state.working_data = fresh_df.copy()
     elif worksheet is not None:
         load_data_from_sheet_cached.clear()
-        fresh_df = load_data_from_sheet(worksheet)
+        fresh_df = load_data_from_sheet(worksheet, recent_only=recent_only)
         fresh_df = ensure_columns(fresh_df)
         st.session_state.server_data = fresh_df.copy()
         st.session_state.working_data = fresh_df.copy()
@@ -576,6 +598,7 @@ def refresh_from_server(supabase_client, worksheet):
         "deleted_row_ids": set()
     }
     st.session_state.edit_loaded_uid = None
+    st.session_state.data_scope = "最近数据" if recent_only else "完整历史"
     st.session_state.last_data_refresh_at = calgary_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -746,6 +769,9 @@ if "edit_loaded_uid" not in st.session_state:
 if "last_data_refresh_at" not in st.session_state:
     st.session_state.last_data_refresh_at = ""
 
+if "data_scope" not in st.session_state:
+    st.session_state.data_scope = "最近数据"
+
 if "entry_date" not in st.session_state:
     st.session_state["entry_date"] = calgary_today()
 if "entry_payment_type" not in st.session_state:
@@ -811,6 +837,7 @@ with st.sidebar:
 
     if st.session_state.last_data_refresh_at:
         st.caption(f"上次读取：{st.session_state.last_data_refresh_at}")
+        st.caption(f"当前范围：{st.session_state.data_scope}")
 
     submit_label = "快速提交到 Supabase" if supabase_client is not None else ("提交缓存到 Google Sheets" if worksheet is not None else "保存到本地会话")
     if st.button(submit_label, type="primary", use_container_width=True, disabled=pending_total == 0):
@@ -862,6 +889,12 @@ with st.sidebar:
         with st.spinner("正在读取数据..."):
             refresh_from_server(supabase_client, worksheet)
         st.success("已读取最新数据。")
+        st.rerun()
+
+    if worksheet is not None and st.button("读取完整历史", use_container_width=True, disabled=pending_total > 0):
+        with st.spinner("正在读取完整历史..."):
+            refresh_from_server(None, worksheet, recent_only=False)
+        st.success("已读取完整历史。")
         st.rerun()
 
     if pending_total > 0:

@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import hashlib
+import uuid
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -99,6 +100,7 @@ BASE_COLUMNS = [
     "profit",
     "created_at",
 ]
+INTERNAL_COLUMNS = ["_record_id"]
 
 CALGARY_TZ = ZoneInfo("America/Edmonton")
 
@@ -153,8 +155,9 @@ def df_to_supabase_rows(df_local):
 
 
 def row_to_supabase_payload(row, row_index):
+    record_id = clean_text_cell(row.get("_record_id", "")) or record_id_for_row(row, row_index)
     return {
-        "record_id": record_id_for_row(row, row_index),
+        "record_id": record_id,
         "date": clean_text_cell(row["date"]),
         "payment_type": clean_text_cell(row["payment_type"]),
         "therapist_name": clean_text_cell(row["therapist_name"]),
@@ -177,18 +180,18 @@ def save_supabase_delta(supabase_client, server_df, pending_changes):
         delete_ids = set()
         for row_id in pending_changes["deleted_row_ids"]:
             if 0 <= row_id < len(server_df):
-                delete_ids.add(record_id_for_row(server_df.iloc[row_id], row_id))
+                delete_ids.add(row_to_supabase_payload(server_df.iloc[row_id], row_id)["record_id"])
 
         update_rows = []
         for row_id, row in pending_changes["updated_rows"].items():
             if 0 <= row_id < len(server_df):
-                delete_ids.add(record_id_for_row(server_df.iloc[row_id], row_id))
+                row["_record_id"] = row_to_supabase_payload(server_df.iloc[row_id], row_id)["record_id"]
                 update_rows.append(row_to_supabase_payload(row, row_id))
 
         new_rows = pending_changes["new_rows"]
         if new_rows:
             update_rows.extend(
-                row_to_supabase_payload(row, len(server_df) + i)
+                row_to_supabase_payload({"_record_id": uuid.uuid4().hex, **row}, len(server_df) + i)
                 for i, row in enumerate(new_rows)
             )
 
@@ -218,7 +221,7 @@ def load_data_from_supabase(supabase_client):
         while True:
             response = (
                 supabase_client.table(SUPABASE_TABLE_NAME)
-                .select(",".join(BASE_COLUMNS))
+                .select("record_id," + ",".join(BASE_COLUMNS))
                 .eq("is_deleted", False)
                 .order("date", desc=True)
                 .range(start, start + min(page_size, SUPABASE_READ_LIMIT - start) - 1)
@@ -232,7 +235,8 @@ def load_data_from_supabase(supabase_client):
 
         if not rows:
             return pd.DataFrame(columns=BASE_COLUMNS)
-        return ensure_columns(pd.DataFrame(rows))
+        df = pd.DataFrame(rows).rename(columns={"record_id": "_record_id"})
+        return ensure_columns(df)
     except Exception:
         return pd.DataFrame(columns=BASE_COLUMNS)
 
@@ -378,7 +382,8 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
                 df[col] = ""
             else:
                 df[col] = 0.0
-    return df[BASE_COLUMNS]
+    keep_cols = BASE_COLUMNS + [col for col in INTERNAL_COLUMNS if col in df.columns]
+    return df[keep_cols]
 
 
 def therapist_select_options(include_blank=True, blank_text=""):
@@ -982,6 +987,7 @@ with entry_tab:
                     st.stop()
 
             row = {
+                "_record_id": uuid.uuid4().hex,
                 "date": str(st.session_state["entry_date"]),
                 "payment_type": payment_type,
                 "therapist_name": therapist_name_to_save,
@@ -1113,6 +1119,7 @@ with manage_tab:
                             st.stop()
 
                     updated_row = {
+                        "_record_id": clean_text_cell(selected_row.get("_record_id", "")),
                         "date": str(st.session_state.get("edit_date_value", calgary_today())),
                         "payment_type": edit_payment_type,
                         "therapist_name": therapist_name_to_save,

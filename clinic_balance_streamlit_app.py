@@ -80,6 +80,7 @@ WORKSHEET_NAME = "transactions"
 THERAPIST_WORKSHEET_NAME = "therapists"
 SUPABASE_TABLE_NAME = "transactions"
 SUPABASE_BATCH_SIZE = 100
+SUPABASE_READ_LIMIT = 2000
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -186,12 +187,13 @@ def load_data_from_supabase(supabase_client):
                 supabase_client.table(SUPABASE_TABLE_NAME)
                 .select(",".join(BASE_COLUMNS))
                 .eq("is_deleted", False)
-                .range(start, start + page_size - 1)
+                .order("date", desc=True)
+                .range(start, start + min(page_size, SUPABASE_READ_LIMIT - start) - 1)
                 .execute()
             )
             batch = response.data or []
             rows.extend(batch)
-            if len(batch) < page_size:
+            if len(batch) < page_size or len(rows) >= SUPABASE_READ_LIMIT:
                 break
             start += page_size
 

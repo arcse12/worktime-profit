@@ -82,7 +82,7 @@ THERAPIST_WORKSHEET_NAME = "therapists"
 SUPABASE_TABLE_NAME = "transactions"
 SUPABASE_BATCH_SIZE = 100
 SUPABASE_READ_LIMIT = 2000
-SHEET_RECENT_ROWS = 1000
+DEFAULT_DATA_SCOPE = "上月和本月"
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -112,6 +112,30 @@ def calgary_now() -> datetime:
 
 def calgary_today() -> date:
     return calgary_now().date()
+
+
+def default_month_keys():
+    today = calgary_today()
+    current = today.strftime("%Y-%m")
+    previous_year = today.year - 1 if today.month == 1 else today.year
+    previous_month = 12 if today.month == 1 else today.month - 1
+    return {f"{previous_year:04d}-{previous_month:02d}", current}
+
+
+def contiguous_ranges(row_numbers):
+    if not row_numbers:
+        return []
+
+    ranges = []
+    start = previous = row_numbers[0]
+    for row_number in row_numbers[1:]:
+        if row_number == previous + 1:
+            previous = row_number
+        else:
+            ranges.append((start, previous))
+            start = previous = row_number
+    ranges.append((start, previous))
+    return ranges
 
 
 # -----------------------------
@@ -398,25 +422,39 @@ def load_data_from_sheet(worksheet, recent_only=True):
     try:
         if recent_only:
             date_values = worksheet.col_values(1)
-            last_row = len(date_values)
-            if last_row <= 1:
+            if len(date_values) <= 1:
                 return pd.DataFrame(columns=BASE_COLUMNS)
-            start_row = max(2, last_row - SHEET_RECENT_ROWS + 1)
-            values = worksheet.get(f"A{start_row}:J{last_row}")
+
+            target_months = default_month_keys()
+            matching_rows = []
+            for sheet_row, value in enumerate(date_values[1:], start=2):
+                parsed_date = pd.to_datetime(value, errors="coerce")
+                if pd.notna(parsed_date) and parsed_date.strftime("%Y-%m") in target_months:
+                    matching_rows.append(sheet_row)
+
+            row_ranges = contiguous_ranges(matching_rows)
+            ranges = [f"A{start}:J{end}" for start, end in row_ranges]
+            range_values = worksheet.batch_get(ranges) if ranges else []
+            values_with_rows = [
+                (sheet_row, row)
+                for (start, _), values in zip(row_ranges, range_values)
+                for sheet_row, row in zip(range(start, start + len(values)), values)
+            ]
         else:
             start_row = 2
             values = worksheet.get("A:J")[1:]
+            values_with_rows = [(start_row + offset, row) for offset, row in enumerate(values)]
 
-        if not values:
+        if not values_with_rows:
             return pd.DataFrame(columns=BASE_COLUMNS)
 
         rows = []
         sheet_row_numbers = []
-        for offset, row in enumerate(values):
+        for sheet_row, row in values_with_rows:
             if not any(str(cell).strip() for cell in row):
                 continue
             rows.append((row + [""] * len(BASE_COLUMNS))[:len(BASE_COLUMNS)])
-            sheet_row_numbers.append(start_row + offset)
+            sheet_row_numbers.append(sheet_row)
 
         df = pd.DataFrame(rows, columns=BASE_COLUMNS)
         df["_sheet_row_number"] = sheet_row_numbers
@@ -571,7 +609,7 @@ def init_data_cache(supabase_client, worksheet):
         st.session_state.server_data = base_df.copy()
         st.session_state.working_data = base_df.copy()
         st.session_state.data_loaded = True
-        st.session_state.data_scope = "最近数据"
+        st.session_state.data_scope = DEFAULT_DATA_SCOPE
         st.session_state.last_data_refresh_at = calgary_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -598,7 +636,7 @@ def refresh_from_server(supabase_client, worksheet, recent_only=True):
         "deleted_row_ids": set()
     }
     st.session_state.edit_loaded_uid = None
-    st.session_state.data_scope = "最近数据" if recent_only else "完整历史"
+    st.session_state.data_scope = DEFAULT_DATA_SCOPE if recent_only else "完整历史"
     st.session_state.last_data_refresh_at = calgary_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -770,7 +808,7 @@ if "last_data_refresh_at" not in st.session_state:
     st.session_state.last_data_refresh_at = ""
 
 if "data_scope" not in st.session_state:
-    st.session_state.data_scope = "最近数据"
+    st.session_state.data_scope = DEFAULT_DATA_SCOPE
 
 if "entry_date" not in st.session_state:
     st.session_state["entry_date"] = calgary_today()

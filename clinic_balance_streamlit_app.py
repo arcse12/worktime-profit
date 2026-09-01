@@ -237,10 +237,10 @@ def save_supabase_snapshot(supabase_client, df_local):
 
         stale_ids = [record_id for record_id in existing_ids if record_id not in active_ids]
         for i in range(0, len(stale_ids), SUPABASE_BATCH_SIZE):
-            supabase_client.table(SUPABASE_TABLE_NAME).update({
-                "is_deleted": True,
-                "synced_at": calgary_now().isoformat(),
-            }).in_("record_id", stale_ids[i:i + SUPABASE_BATCH_SIZE]).execute()
+            supabase_client.table(SUPABASE_TABLE_NAME).delete().in_(
+                "record_id",
+                stale_ids[i:i + SUPABASE_BATCH_SIZE],
+            ).execute()
 
         load_data_from_supabase_cached.clear()
     except Exception as e:
